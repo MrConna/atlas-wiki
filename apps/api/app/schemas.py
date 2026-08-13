@@ -42,7 +42,6 @@ class DocumentRead(BaseModel):
     filename: str
     media_type: str
     content_hash: str
-    storage_path: str
     size_bytes: int
     status: str
     created_at: datetime
