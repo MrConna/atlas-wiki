@@ -371,6 +371,10 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
             evidence="insufficient",
             citations=citations,
         )
+    insufficient_marker = "INSUFFICIENT_EVIDENCE"
+    if generated.startswith(insufficient_marker):
+        refusal = generated[len(insufficient_marker) :].lstrip(" :—-\n")
+        return AskResponse(answer=refusal, evidence="insufficient", citations=citations)
     return AskResponse(answer=generated, evidence="sufficient", citations=citations)
 
 

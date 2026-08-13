@@ -115,6 +115,21 @@ def test_citation_validation_allows_dotted_identifiers(monkeypatch):
     assert answer["evidence"] == "sufficient"
 
 
+def test_cited_model_refusal_is_reported_as_insufficient(monkeypatch):
+    client.post(
+        "/api/v1/pages",
+        json={"title": "Scope", "content": "Questions about baking bread are outside this software documentation's scope."},
+    )
+
+    async def fake_generate(_question, _evidence):
+        return "INSUFFICIENT_EVIDENCE The sources contain no baking instructions [1]."
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "How do I bake bread?"}).json()
+    assert answer["evidence"] == "insufficient"
+    assert answer["answer"] == "The sources contain no baking instructions [1]."
+
+
 def test_search_handles_one_thousand_pages():
     from app.database import SessionLocal
     from app.main import rebuild_chunks
