@@ -149,3 +149,15 @@ def test_page_slug_remains_stable_after_rename():
     renamed = client.patch(f"/api/v1/pages/{page['id']}", json={"title": "New Display Name"}).json()
     assert renamed["title"] == "New Display Name"
     assert renamed["slug"] == "stable-link"
+
+
+def test_document_response_hides_internal_storage_path():
+    client.post("/api/v1/imports", files={"file": ("private.txt", b"private source", "text/plain")})
+    document = client.get("/api/v1/documents").json()[0]
+    assert "storage_path" not in document
+
+
+def test_repeated_delete_returns_not_found():
+    page = client.post("/api/v1/pages", json={"title": "Delete once"}).json()
+    assert client.delete(f"/api/v1/pages/{page['id']}").status_code == 204
+    assert client.delete(f"/api/v1/pages/{page['id']}").status_code == 404

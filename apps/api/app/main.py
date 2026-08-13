@@ -83,6 +83,15 @@ async def lifespan(_app: FastAPI):
             os.replace(tombstone, canonical)
         else:
             tombstone.unlink(missing_ok=True)
+    for candidate in upload_dir.iterdir():
+        if (
+            candidate.is_file()
+            and candidate.name != ".gitkeep"
+            and not candidate.name.startswith(".atlas-")
+            and not candidate.name.endswith(".deleting")
+            and candidate.name not in referenced
+        ):
+            candidate.unlink(missing_ok=True)
     yield
 
 
@@ -94,7 +103,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-app.add_middleware(TrustedHostMiddleware, allowed_hosts=["localhost", "127.0.0.1", "api", "testserver"])
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.trusted_hosts)
 
 
 @app.middleware("http")
@@ -258,24 +267,27 @@ def update_page(page_id: str, payload: PageUpdate, db: Session = Depends(get_db)
 
 @app.delete("/api/v1/pages/{page_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_page(page_id: str, db: Session = Depends(get_db)):
-    page = require_page(db, page_id)
-    stored_path = Path(page.document.storage_path) if page.document else None
-    tombstone = stored_path.with_suffix(stored_path.suffix + ".deleting") if stored_path else None
-    if stored_path and stored_path.exists() and tombstone:
-        os.replace(stored_path, tombstone)
-    db.delete(page)
-    try:
-        db.commit()
-    except Exception:
-        db.rollback()
-        if tombstone and tombstone.exists() and stored_path:
-            os.replace(tombstone, stored_path)
-        raise
-    if tombstone:
+    with storage_lock:
+        page = db.get(Page, page_id)
+        if page is None:
+            raise HTTPException(status_code=404, detail="Page not found")
+        stored_path = Path(page.document.storage_path) if page.document else None
+        tombstone = stored_path.with_suffix(stored_path.suffix + ".deleting") if stored_path else None
+        if stored_path and stored_path.exists() and tombstone:
+            os.replace(stored_path, tombstone)
+        db.delete(page)
         try:
-            tombstone.unlink(missing_ok=True)
-        except OSError:
-            pass  # Startup reconciliation retries post-commit cleanup.
+            db.commit()
+        except Exception:
+            db.rollback()
+            if tombstone and tombstone.exists() and stored_path:
+                os.replace(tombstone, stored_path)
+            raise
+        if tombstone:
+            try:
+                tombstone.unlink(missing_ok=True)
+            except OSError:
+                pass  # Startup reconciliation retries post-commit cleanup.
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 

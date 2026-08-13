@@ -10,6 +10,7 @@
 - Retrieved documents are explicitly treated as untrusted data in the model prompt.
 - Model failures return a generic error class instead of provider response bodies or credentials.
 - CORS defaults to the local web origin.
+- Trusted hosts are configurable through `ALLOWED_HOSTS` for LAN or reverse-proxy deployments.
 - No credentials are committed; configuration is environment-based.
 
 ## Deployment boundary
