@@ -347,7 +347,7 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
             citations=[],
         )
     try:
-        generated = await generate_answer(payload.question, [citation.excerpt for citation in citations])
+        generated = await generate_answer(payload.question, [chunk.content for chunk, _page, _score in rows])
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Model provider failed: {type(exc).__name__}") from exc
     if generated is None:
@@ -359,7 +359,9 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
     markers = {int(value) for value in re.findall(r"\[(\d+)\]", generated)}
     factual_sentences = []
     for line in generated.splitlines():
-        for sentence in re.findall(r"[^.!?。！？]+(?:[.!?。！？](?:\s*\[\d+\])*)?", line):
+        # Split only at punctuation followed by whitespace so dotted identifiers
+        # such as `AGENTS.md` do not become uncited pseudo-sentences.
+        for sentence in re.split(r"(?<=[.!?。！？])\s+", line):
             if len(re.findall(r"[\w\u4e00-\u9fff]+", sentence)) >= 3:
                 factual_sentences.append(sentence.strip())
     every_sentence_cited = factual_sentences and all(re.search(r"\[\d+\]", sentence) for sentence in factual_sentences)

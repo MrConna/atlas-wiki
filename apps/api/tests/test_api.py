@@ -78,16 +78,18 @@ def test_ask_reports_insufficient_evidence():
 
 
 def test_generated_answer_gets_a_citation_marker(monkeypatch):
-    client.post("/api/v1/pages", json={"title": "Grounding", "content": "Citations make claims traceable."})
+    long_evidence = "Citations make claims traceable. " + "context " * 80
+    client.post("/api/v1/pages", json={"title": "Grounding", "content": long_evidence})
 
-    async def fake_generate(_question, _evidence):
-        return "Claims are traceable. [1]"
+    async def fake_generate(_question, evidence):
+        assert len(evidence[0]) > 400
+        return "Claims are traceable [1]."
 
     monkeypatch.setattr("app.main.generate_answer", fake_generate)
     answer = client.post("/api/v1/ask", json={"question": "traceable"})
     assert answer.status_code == 200
     assert answer.json()["evidence"] == "sufficient"
-    assert answer.json()["answer"].endswith("[1]")
+    assert "[1]" in answer.json()["answer"]
 
 
 def test_generated_answer_without_valid_citation_is_rejected(monkeypatch):
@@ -100,6 +102,17 @@ def test_generated_answer_without_valid_citation_is_rejected(monkeypatch):
     answer = client.post("/api/v1/ask", json={"question": "grounded fact"}).json()
     assert answer["evidence"] == "insufficient"
     assert "did not produce verifiable" in answer["answer"]
+
+
+def test_citation_validation_allows_dotted_identifiers(monkeypatch):
+    client.post("/api/v1/pages", json={"title": "Instructions", "content": "AGENTS.md contains project guidance."})
+
+    async def fake_generate(_question, _evidence):
+        return "Codex reads `AGENTS.md` for project guidance [1]."
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "AGENTS.md guidance"}).json()
+    assert answer["evidence"] == "sufficient"
 
 
 def test_search_handles_one_thousand_pages():
