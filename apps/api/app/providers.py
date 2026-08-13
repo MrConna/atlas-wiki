@@ -30,11 +30,13 @@ async def generate_answer(question: str, evidence: list[str]) -> str | None:
             )
             response.raise_for_status()
             return response.json()["message"]["content"].strip()
-    if provider == "openai":
-        headers = {"Authorization": f"Bearer {settings.openai_api_key}"} if settings.openai_api_key else {}
+    if provider in {"openai", "deepseek"}:
+        api_key = settings.deepseek_api_key if provider == "deepseek" else settings.openai_api_key
+        base_url = settings.deepseek_base_url if provider == "deepseek" else settings.openai_base_url
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         async with httpx.AsyncClient(timeout=90) as client:
             response = await client.post(
-                f"{settings.openai_base_url.rstrip('/')}/chat/completions",
+                f"{base_url.rstrip('/')}/chat/completions",
                 headers=headers,
                 json={
                     "model": settings.model_name,
