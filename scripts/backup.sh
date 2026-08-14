@@ -39,9 +39,10 @@ docker compose exec -T db pg_isready -U atlas -d atlas >/dev/null
 docker compose run --rm --no-deps --entrypoint python api scripts/verify_storage.py
 docker compose exec -T db pg_dump -U atlas -d atlas \
   --format=custom --no-owner --no-acl >"$tmp_dir/database.dump"
-docker compose run --rm --no-deps --entrypoint tar api \
+docker compose run --rm --no-deps --quiet --no-TTY --entrypoint tar api \
   --sort=name --mtime='UTC 1970-01-01' --owner=0 --group=0 --numeric-owner \
   --exclude='./.gitkeep' -C /app/uploads -cf - . >"$tmp_dir/uploads.tar"
+tar -tf "$tmp_dir/uploads.tar" >/dev/null
 
 git_sha=$(git rev-parse HEAD 2>/dev/null || printf 'unknown')
 alembic_version=$(docker compose exec -T db psql -U atlas -d atlas -Atqc \
