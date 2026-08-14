@@ -66,3 +66,39 @@ def test_existing_sqlite_migration_preserves_legacy_embedding_data(tmp_path):
 
     assert legacy == "[0.4, 0.5]"
     assert current is None
+
+    subprocess.run(
+        [sys.executable, "-m", "alembic", "downgrade", "0001_baseline"],
+        cwd=api_dir,
+        env=environment,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    with sqlite3.connect(database_path) as connection:
+        restored = connection.execute("SELECT embedding FROM chunks WHERE id = 'chunk-1'").fetchone()[0]
+    assert restored == "[0.4, 0.5]"
+
+
+def test_baseline_rejects_schema_without_integrity_constraints(tmp_path):
+    api_dir = Path(__file__).parents[1]
+    database_path = tmp_path / "unsafe.db"
+    environment = os.environ | {"DATABASE_URL": f"sqlite:///{database_path}"}
+    definitions = {
+        "pages": ("id", "title", "slug", "content", "source_type", "created_at", "updated_at"),
+        "documents": ("id", "page_id", "filename", "media_type", "content_hash", "storage_path", "size_bytes", "status", "created_at"),
+        "chunks": ("id", "page_id", "content", "heading_path", "source_location", "position", "embedding"),
+    }
+    with sqlite3.connect(database_path) as connection:
+        for table, columns in definitions.items():
+            connection.execute(f"CREATE TABLE {table} ({', '.join(f'{column} TEXT' for column in columns)})")
+
+    result = subprocess.run(
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
+        cwd=api_dir,
+        env=environment,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "expected primary key" in result.stderr

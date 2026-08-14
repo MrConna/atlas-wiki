@@ -48,12 +48,21 @@ def backfill(batch_size: int, dry_run: bool) -> int:
                 ).all()
                 if not rows:
                     break
-                snapshots = [(chunk.id, chunk.content, title) for chunk, title in rows]
-                vectors = provider.embed_documents([(title, content) for _id, content, title in snapshots])
+                snapshots = [(chunk.id, chunk.page_id, chunk.content, title) for chunk, title in rows]
+                vectors = provider.embed_documents([(title, content) for _id, _page_id, content, title in snapshots])
+                # Provider inference can take seconds. Discard the pre-call identity
+                # map so the compare-and-set checks observe concurrent edits.
+                db.expire_all()
                 updated = 0
-                for (chunk_id, original_content, _title), vector in zip(snapshots, vectors, strict=True):
+                for (chunk_id, page_id, original_content, original_title), vector in zip(snapshots, vectors, strict=True):
                     chunk = db.get(Chunk, chunk_id)
-                    if chunk is None or chunk.content != original_content:
+                    page = db.get(Page, page_id)
+                    if (
+                        chunk is None
+                        or page is None
+                        or chunk.content != original_content
+                        or page.title != original_title
+                    ):
                         continue
                     chunk.embedding = vector
                     chunk.embedding_model = identity
