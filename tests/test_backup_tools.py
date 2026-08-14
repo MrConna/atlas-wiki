@@ -60,12 +60,13 @@ class BackupToolTests(unittest.TestCase):
         executable.chmod(0o700)
         return binary_dir, log
 
-    def run_common(self, command: str, *arguments: str, env=None):
+    def run_common(self, command: str, *arguments: str, env=None, cwd=None):
         return subprocess.run(
             ["bash", "-c", f'source "$1"; {command}', "test", str(ROOT / "scripts/ops_common.sh"), *arguments],
             capture_output=True,
             text=True,
             env=env,
+            cwd=cwd,
         )
 
     def test_bundle_rejects_symlink_member(self):
@@ -196,6 +197,120 @@ class BackupToolTests(unittest.TestCase):
                 holder.terminate()
                 holder.communicate(timeout=3)
 
+    def test_default_lock_uses_compose_project_across_checkouts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime = root / "runtime"
+            first_checkout = root / "first" / "checkout"
+            second_checkout = root / "second" / "checkout"
+            runtime.mkdir(mode=0o700)
+            first_checkout.mkdir(parents=True)
+            second_checkout.mkdir(parents=True)
+            environment = os.environ | {
+                "XDG_RUNTIME_DIR": str(runtime),
+                "COMPOSE_PROJECT_NAME": "shared-atlas",
+            }
+            holder = subprocess.Popen(
+                [
+                    "bash", "-c",
+                    'source "$1"; ops_acquire_lock; echo locked; sleep 30',
+                    "holder", str(ROOT / "scripts/ops_common.sh"),
+                ],
+                cwd=first_checkout,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                env=environment,
+            )
+            try:
+                self.assertEqual(holder.stdout.readline().strip(), "locked")
+                same_project = self.run_common(
+                    "ops_acquire_lock", env=environment, cwd=second_checkout
+                )
+                self.assertEqual(same_project.returncode, 4, same_project.stderr)
+                other_project = self.run_common(
+                    "ops_acquire_lock",
+                    env=environment | {"COMPOSE_PROJECT_NAME": "other-atlas"},
+                    cwd=second_checkout,
+                )
+                self.assertEqual(other_project.returncode, 0, other_project.stderr)
+            finally:
+                holder.terminate()
+                holder.communicate(timeout=3)
+
+    def test_lock_rejects_symlink_and_unsafe_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            victim = root / "victim"
+            victim.write_text("do not alter")
+            victim.chmod(0o600)
+            symlink_lock = root / "linked.lock"
+            symlink_lock.symlink_to(victim)
+            linked = self.run_common(
+                "ops_acquire_lock",
+                env=os.environ | {"ATLAS_OPS_LOCK_FILE": str(symlink_lock)},
+            )
+            self.assertEqual(linked.returncode, 3)
+            self.assertEqual(victim.read_text(), "do not alter")
+
+            unsafe = root / "unsafe"
+            unsafe.mkdir(mode=0o755)
+            unsafe.chmod(0o755)
+            unsafe_result = self.run_common(
+                "ops_acquire_lock",
+                env=os.environ | {"ATLAS_OPS_LOCK_FILE": str(unsafe / "ops.lock")},
+            )
+            self.assertEqual(unsafe_result.returncode, 3)
+            self.assertFalse((unsafe / "ops.lock").exists())
+
+    def test_default_lock_rejects_unsafe_runtime_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "runtime"
+            runtime.mkdir(mode=0o755)
+            runtime.chmod(0o755)
+            result = self.run_common(
+                "ops_acquire_lock",
+                env=os.environ | {
+                    "XDG_RUNTIME_DIR": str(runtime),
+                    "COMPOSE_PROJECT_NAME": "atlas",
+                },
+            )
+            self.assertEqual(result.returncode, 3)
+
+    def test_decrypt_rejects_public_or_wrong_owner_identity_before_age(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = root / "age-called"
+            fake_age = root / "never-age"
+            fake_age.write_text('#!/bin/sh\ntouch "$FAKE_AGE_MARKER"\nexit 99\n')
+            fake_age.chmod(0o700)
+            ciphertext = root / "backup.age"
+            ciphertext.write_bytes(b"ciphertext")
+            output = root / "output"
+            identity = root / "identity.txt"
+            identity.write_text("AGE-SECRET-KEY-test")
+            identity.chmod(0o644)
+            environment = os.environ | {
+                "ATLAS_AGE_BIN": str(fake_age),
+                "FAKE_AGE_MARKER": str(marker),
+            }
+            public = self.run_common(
+                'ops_decrypt_file "$2" "$3" "$4"',
+                str(identity), str(ciphertext), str(output), env=environment,
+            )
+            self.assertEqual(public.returncode, 3)
+            self.assertFalse(marker.exists())
+
+            if os.geteuid() == 0:
+                identity.chmod(0o600)
+                os.chown(identity, 65534, 65534)
+                wrong_owner = self.run_common(
+                    'ops_decrypt_file "$2" "$3" "$4"',
+                    str(identity), str(ciphertext), str(output), env=environment,
+                )
+                self.assertEqual(wrong_owner.returncode, 3)
+                self.assertFalse(marker.exists())
+
     def test_signal_handlers_return_stable_codes_and_cleanup(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "marker"
@@ -240,6 +355,8 @@ class BackupToolTests(unittest.TestCase):
             source.write_bytes(b"synthetic bundle")
             correct_identity.write_text("age1-correct")
             wrong_identity.write_text("age1-wrong")
+            correct_identity.chmod(0o600)
+            wrong_identity.chmod(0o600)
             environment = os.environ | {
                 "ATLAS_AGE_BIN": str(fake_age),
                 "ATLAS_OPS_LOCK_FILE": str(root / "ops.lock"),
@@ -291,6 +408,7 @@ class BackupToolTests(unittest.TestCase):
             identity = root / "identity.txt"
             archive.write_bytes(b"ciphertext")
             identity.write_text("age1-test")
+            identity.chmod(0o600)
             environment = os.environ | {
                 "ATLAS_AGE_BIN": str(slow_age),
                 "ATLAS_OPS_LOCK_FILE": str(root / "ops.lock"),

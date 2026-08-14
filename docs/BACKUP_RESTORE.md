@@ -7,6 +7,13 @@ model digest, and the prompt-schema version.
 
 Backup and restore take the same non-blocking host lock. A second operation
 exits with code `4`; it never waits behind a potentially destructive restore.
+The lock is keyed by `COMPOSE_PROJECT_NAME` (or Compose's directory-name
+default), so separate checkouts operating on the same Compose project must use
+the same explicit project name. It lives in an owner-only runtime directory;
+an unsafe runtime directory, custom lock parent, or symbolic-link lock is
+rejected with code `3`. `ATLAS_OPS_LOCK_FILE` is intended only for controlled
+automation and its parent directory must be owned by the current user with no
+group/other permissions.
 Run the scripts from the repository root and do not run direct database writers
 during either operation.
 
@@ -46,7 +53,10 @@ The plaintext mode emits a warning and must not be used for private data.
 Use the same or a newer compatible Atlas checkout. The target database public
 schema and uploads directory must be empty. Start only the database, then point
 restore at an age identity file; the file contains a secret and should be mode
-`0600`, outside the repository, and never pasted into a command or log:
+`0600` (owner-readable/writable only), owned by the current user, outside the
+repository, and never pasted into a command or log. Restore rejects symbolic
+links, identities owned by another UID, and any group/other permission bits
+before invoking `age`:
 
 ```bash
 docker compose up -d db
