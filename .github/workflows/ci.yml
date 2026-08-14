@@ -12,7 +12,7 @@ jobs:
   api:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: docker build -t atlas-wiki-api-ci apps/api
       - name: API tests
         run: >-
@@ -27,8 +27,8 @@ jobs:
       run:
         working-directory: apps/web
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -40,7 +40,7 @@ jobs:
   compose:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cp .env.example .env
       - run: docker compose config --quiet
       - run: docker compose -f compose.yaml -f compose.ollama.yaml config --quiet
@@ -48,7 +48,7 @@ jobs:
   backup-restore:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - run: cp .env.example .env
       - name: Start clean Atlas
         run: docker compose up -d --build db api
