@@ -27,18 +27,19 @@ Run the native integration gate against an already populated Atlas API containin
 ```bash
 python scripts/eval_retrieval.py --mode hybrid \
   --base-url http://127.0.0.1:8000 \
+  --git-sha "$(git rev-parse HEAD)" \
   --assert-native-gates --json retrieval-native.json
 ```
 
 ## Native pgvector result
 
-Measured with Ollama 0.11.10, `embeddinggemma:300m-qat-q4_0`, 768 dimensions, exact pgvector cosine search, and fixture version 1:
+Measured in a clean database containing exactly the two fixture documents, with Ollama 0.11.10, `embeddinggemma:300m-qat-q4_0` digest `101341d65c2ccbf23f16650b79d30b9fca94a45ffa09a9984c600157b81a58df`, 768 dimensions, exact pgvector cosine search, and fixture version 1:
 
 | Mode | Hit@1 | Hit@5 | Recall@5 | MRR@10 | Cross-doc all@5 | Unrelated FP |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| hybrid | 0.875 | 1.000 | 1.000 | 0.927 | 1.00 | 0.00 |
+| hybrid | 1.000 | 1.000 | 1.000 | 1.000 | 1.00 | 0.00 |
 
-Exact, paraphrase, cross-document, and adversarial class Recall@5 are all 1.00. Query decomposition is deterministic and only expands a result set after a primary query (or a cleaned adversarial clause) clears the confidence gate. Keyword overlap is a bounded reranking bonus; it cannot rescue a low-similarity result. These rules preserve rejection for all unrelated fixture queries while recovering multi-intent and prompt-injection-shaped questions.
+Exact, paraphrase, cross-document, and adversarial class Recall@5 are all 1.00. Query decomposition is deterministic, capped at four parts, and strips leading control-language clauses before embedding; adding control language never lowers the confidence threshold. Keyword overlap is a bounded reranking signal and only rescues strong exact-term matches. These rules preserve rejection for all unrelated fixture queries while recovering multi-intent and prompt-injection-shaped questions. The gate verifies the server-reported native backend/model identity, exact fixture-only page set, fixture hashes, and exact Git SHA; it writes its JSON report even when a metric fails.
 
 ## Feature-hash baseline
 

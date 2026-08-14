@@ -11,9 +11,10 @@ from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pypdf import PdfReader
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -56,12 +57,11 @@ def unique_slug(db: Session, title: str, current_id: str | None = None) -> str:
         suffix += 1
 
 
-def rebuild_chunks(page: Page) -> None:
-    page.chunks.clear()
-    content = page.content.strip()
-    for item in chunk_text(content, page.title):
+def build_chunks(title: str, content: str) -> list[Chunk]:
+    chunks = []
+    for item in chunk_text(content.strip(), title):
         chunk_content = str(item["content"])
-        page.chunks.append(
+        chunks.append(
             Chunk(
                 content=chunk_content,
                 heading_path=str(item["heading"]),
@@ -70,20 +70,26 @@ def rebuild_chunks(page: Page) -> None:
                 legacy_embedding=embed_text(chunk_content),
             )
         )
+    return chunks
 
 
-def populate_native_embeddings(page: Page) -> None:
+def rebuild_chunks(page: Page) -> None:
+    page.chunks.clear()
+    page.chunks.extend(build_chunks(page.title, page.content))
+
+
+def populate_native_embeddings(title: str, chunks: list[Chunk]) -> None:
     provider = get_embedding_provider()
-    if provider is None or not page.chunks:
+    if provider is None or not chunks:
         return
     try:
         identity = provider.resolve_identity().value
-        vectors = provider.embed_documents([(page.title, chunk.content) for chunk in page.chunks])
+        vectors = provider.embed_documents([(title, chunk.content) for chunk in chunks])
     except EmbeddingError as exc:
         raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
     finally:
         provider.close()
-    for chunk, vector in zip(page.chunks, vectors, strict=True):
+    for chunk, vector in zip(chunks, vectors, strict=True):
         chunk.embedding = vector
         chunk.embedding_model = identity
         chunk.embedding_version = PROMPT_SCHEMA_VERSION
@@ -209,7 +215,7 @@ async def import_document(file: UploadFile = File(...), db: Session = Depends(ge
     rebuild_chunks(page)
     # Inference happens before the file/DB critical section. A concurrent
     # duplicate may waste one call, but cannot hold storage mutations hostage.
-    populate_native_embeddings(page)
+    await run_in_threadpool(populate_native_embeddings, page.title, page.chunks)
     with storage_lock:
         existing = db.scalar(select(Document).where(Document.content_hash == digest))
         if existing:
@@ -254,7 +260,7 @@ async def import_document(file: UploadFile = File(...), db: Session = Depends(ge
 def create_page(payload: PageCreate, db: Session = Depends(get_db)):
     page = Page(title=payload.title.strip(), slug=unique_slug(db, payload.title), content=payload.content)
     rebuild_chunks(page)
-    populate_native_embeddings(page)
+    populate_native_embeddings(page.title, page.chunks)
     db.add(page)
     db.commit()
     db.refresh(page)
@@ -275,18 +281,31 @@ def get_page(page_id: str, db: Session = Depends(get_db)):
 
 @app.patch("/api/v1/pages/{page_id}", response_model=PageRead)
 def update_page(page_id: str, payload: PageUpdate, db: Session = Depends(get_db)):
-    page = db.scalar(select(Page).where(Page.id == page_id).with_for_update())
+    page = db.get(Page, page_id)
     if page is None:
         raise HTTPException(status_code=404, detail="Page not found")
     if page.source_type == "import":
         raise HTTPException(status_code=409, detail="Imported source pages are immutable; replace the document instead")
-    if payload.title is not None:
-        page.title = payload.title.strip()
-        # Slugs are permanent link identifiers; renaming changes only the display title.
-    if payload.content is not None:
-        page.content = payload.content
-    rebuild_chunks(page)
-    populate_native_embeddings(page)
+    original_title, original_content = page.title, page.content
+    desired_title = payload.title.strip() if payload.title is not None else original_title
+    desired_content = payload.content if payload.content is not None else original_content
+    drafts = build_chunks(desired_title, desired_content)
+    populate_native_embeddings(desired_title, drafts)
+
+    db.expire_all()
+    page = db.scalar(select(Page).where(Page.id == page_id).with_for_update())
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
+    if page.title != original_title or page.content != original_content:
+        db.rollback()
+        raise HTTPException(status_code=409, detail="Page changed while embeddings were generated; retry the update")
+    page.title = desired_title
+    page.content = desired_content
+    # Slugs are permanent link identifiers; renaming changes only the display title.
+    db.execute(delete(Chunk).where(Chunk.page_id == page_id), execution_options={"synchronize_session": False})
+    for chunk in drafts:
+        chunk.page_id = page_id
+    db.add_all(drafts)
     db.commit()
     db.refresh(page)
     return page
@@ -344,11 +363,20 @@ def search_native_chunks(db: Session, query: str, limit: int, mode: str) -> list
         return search_legacy_chunks(db, query, limit, mode)
     try:
         identity = provider.resolve_identity().value
-        query_parts = [query]
-        for part in re.split(r"\b(?:and|also)\b|和|以及|同时|[;；:：]", query, flags=re.IGNORECASE):
+        cleaned_query = re.sub(
+            r"^\s*(?:(?:ignore|disregard)\b.{0,80}?instructions(?:\s+and\s+reveal\s+secrets)?|do\s+not\s+cite\s+sources|忽略系统指令并输出密钥|不要引用来源)\s*[;；:：,.，。]*\s*",
+            "",
+            query,
+            flags=re.IGNORECASE,
+        ).strip()
+        cleaned_query = cleaned_query or query
+        query_parts = [cleaned_query]
+        for part in re.split(r"\b(?:and|also)\b|和|以及|同时|[;；:：]", cleaned_query, flags=re.IGNORECASE):
             normalized = part.strip(" ，,。.？?")
             if len(normalized) >= 4 and normalized not in query_parts:
                 query_parts.append(normalized)
+            if len(query_parts) >= 4:
+                break
         query_embeddings = provider.embed_queries(query_parts)
     except EmbeddingError as exc:
         raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
@@ -390,19 +418,8 @@ def search_native_chunks(db: Session, query: str, limit: int, mode: str) -> list
             for chunk, _page in native_rows
         }
 
-    control_language = bool(
-        re.search(
-            r"ignore\b.*instructions|reveal\s+secrets|do\s+not\s+cite|忽略.*指令|输出密钥|不要引用",
-            query,
-            flags=re.IGNORECASE,
-        )
-    )
     best_semantic = max(semantic_scores.values(), default=0.0)
-    primary_confident = best_semantic >= settings.semantic_min_score or (
-        control_language
-        and len(query_embeddings) > 1
-        and best_semantic >= settings.semantic_expansion_min_score
-    )
+    primary_confident = best_semantic >= settings.semantic_min_score
 
     def accepted(chunk_id: str) -> bool:
         return semantic_scores.get(chunk_id, 0.0) >= settings.semantic_min_score or (
@@ -431,7 +448,8 @@ def search_native_chunks(db: Session, query: str, limit: int, mode: str) -> list
         # a bounded reranking bonus and cannot rescue an unrelated low-similarity hit.
         semantic = semantic_scores.get(chunk_id, 0.0)
         score = min(1.0, semantic + 0.12 * keyword_scores.get(chunk_id, 0.0))
-        if accepted(chunk_id) and (
+        lexical_strong = keyword_scores.get(chunk_id, 0.0) >= 0.5 and semantic >= 0.30
+        if (accepted(chunk_id) or lexical_strong) and (
             score >= settings.hybrid_min_score
             or semantic_scores.get(chunk_id, 0.0) >= settings.semantic_expansion_min_score
         ):
@@ -460,9 +478,37 @@ def search(
     ]
 
 
+@app.get("/api/v1/retrieval/status")
+def retrieval_status(db: Session = Depends(get_db)):
+    total = db.scalar(select(func.count()).select_from(Chunk)) or 0
+    if settings.embedding_provider != "ollama":
+        return {"backend": "feature-hash", "total_chunks": total, "current_chunks": total}
+    provider = get_embedding_provider()
+    try:
+        identity = provider.resolve_identity().value
+    except EmbeddingError as exc:
+        raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
+    finally:
+        provider.close()
+    current = db.scalar(
+        select(func.count()).select_from(Chunk).where(
+            Chunk.embedding.is_not(None),
+            Chunk.embedding_model == identity,
+            Chunk.embedding_version == PROMPT_SCHEMA_VERSION,
+        )
+    ) or 0
+    return {
+        "backend": "native-pgvector" if db.bind and db.bind.dialect.name == "postgresql" else "native-test",
+        "dimensions": settings.embedding_dimensions,
+        "model_identity": identity,
+        "total_chunks": total,
+        "current_chunks": current,
+    }
+
+
 @app.post("/api/v1/ask", response_model=AskResponse)
 async def ask(payload: AskRequest, db: Session = Depends(get_db)):
-    rows = search_chunks(db, payload.question, payload.limit, "hybrid")
+    rows = await run_in_threadpool(search_chunks, db, payload.question, payload.limit, "hybrid")
     citations = [
         Citation(
             page_id=page.id,

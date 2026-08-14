@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
+import hashlib
 import json
 import os
+import re
 import tempfile
 from collections import defaultdict
 from pathlib import Path
@@ -24,11 +26,17 @@ def main() -> None:
         action="store_true",
         help="Fail unless the native hybrid retrieval release gates are met",
     )
+    parser.add_argument("--git-sha", help="Exact 40-character commit SHA recorded in native reports")
     args = parser.parse_args()
 
     fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "retrieval"
     manifest = json.loads((fixture_dir / "manifest.json").read_text())
     queries = load_jsonl(fixture_dir / "queries.jsonl")
+    fixture_hashes = {
+        str(path.relative_to(fixture_dir)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in sorted(fixture_dir.rglob("*"))
+        if path.is_file()
+    }
 
     def execute_queries(client) -> list[dict]:
         rows = []
@@ -65,6 +73,16 @@ def main() -> None:
         import httpx
 
         with httpx.Client(base_url=args.base_url, timeout=120) as client:
+            retrieval_status = client.get("/api/v1/retrieval/status")
+            retrieval_status.raise_for_status()
+            backend_metadata = retrieval_status.json()
+            actual_titles = {page["title"] for page in client.get("/api/v1/pages").json()}
+            expected_titles = {document["doc_key"] for document in manifest["documents"]}
+            if args.assert_native_gates and actual_titles != expected_titles:
+                raise SystemExit(
+                    f"Native gate requires the exact fixture corpus; expected {sorted(expected_titles)}, "
+                    f"found {sorted(actual_titles)}"
+                )
             rows = execute_queries(client)
     else:
         with tempfile.TemporaryDirectory(prefix="atlas-retrieval-eval-") as temp_dir:
@@ -87,6 +105,7 @@ def main() -> None:
                     )
                     response.raise_for_status()
                 rows = execute_queries(client)
+            backend_metadata = {"backend": "feature-hash"}
 
     answerable = [row for row in rows if row["expect_answerable"]]
     unrelated = [row for row in rows if not row["expect_answerable"]]
@@ -105,7 +124,10 @@ def main() -> None:
         )
 
     report = {
-        "backend": "native-pgvector" if args.base_url else "feature-hash",
+        "backend": backend_metadata["backend"],
+        "backend_metadata": backend_metadata,
+        "git_sha": args.git_sha,
+        "fixture_sha256": fixture_hashes,
         "mode": args.mode,
         "query_count": len(rows),
         "metrics": {
@@ -134,22 +156,28 @@ def main() -> None:
     if args.assert_native_gates:
         if not args.base_url or args.mode != "hybrid":
             parser.error("--assert-native-gates requires --base-url and --mode hybrid")
+        if not args.git_sha or not re.fullmatch(r"[0-9a-f]{40}", args.git_sha):
+            parser.error("--assert-native-gates requires --git-sha with the exact 40-character commit SHA")
         gates = {
+            "native_backend": report["backend"] == "native-pgvector",
             "recall_at_5": report["metrics"]["recall_at_5"] >= 0.80,
             "mrr_at_10": report["metrics"]["mrr_at_10"] >= 0.65,
             "cross_doc_all_relevant_at_5": report["metrics"]["cross_doc_all_relevant_at_5"] >= 0.75,
             "unrelated_false_positive_rate": report["metrics"]["unrelated_false_positive_rate"] <= 0.10,
+            "exact_recall_at_3": recall_at(by_class["exact"], 3) >= 0.98,
             "paraphrase_recall_at_5": report["class_recall_at_5"].get("paraphrase", 0) >= 0.80,
+            "paraphrase_improvement_over_legacy": report["class_recall_at_5"].get("paraphrase", 0)
+            >= (2 / 3 + 0.20),
             "adversarial_recall_at_5": report["class_recall_at_5"].get("adversarial", 0) >= 0.90,
         }
         failed = [name for name, passed in gates.items() if not passed]
         report["release_gates"] = gates
-        if failed:
-            raise SystemExit(f"Native retrieval gates failed: {', '.join(failed)}")
     rendered = json.dumps(report, indent=2, ensure_ascii=False)
     if args.json_output:
         args.json_output.write_text(rendered + "\n")
     print(rendered)
+    if args.assert_native_gates and failed:
+        raise SystemExit(f"Native retrieval gates failed: {', '.join(failed)}")
 
 
 if __name__ == "__main__":
