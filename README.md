@@ -85,6 +85,18 @@ docker compose exec api python -m app.cli embeddings-backfill
 
 Backfill is resumable and model-aware. It preserves the old feature-hash vectors for rollback and commits each validated batch atomically. The optional model volume is persistent and Ollama is not exposed on a host port.
 
+## Backup and restore
+
+Back up PostgreSQL and uploaded source files from one stopped-write window:
+
+```bash
+scripts/backup.sh /secure/path/atlas-backup.tar.gz
+```
+
+Restoration verifies checksums and refuses to overwrite non-empty data. See
+[`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md) for clean-environment
+recovery, integrity checks, encryption guidance, and retention policy.
+
 ## Development
 
 API:
