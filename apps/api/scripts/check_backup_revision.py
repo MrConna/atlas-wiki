@@ -7,7 +7,8 @@ from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from alembic.script.revision import RangeNotAncestorError
+from alembic.script.revision import RangeNotAncestorError, ResolutionError
+from alembic.util.exc import CommandError
 
 
 def main() -> int:
@@ -27,7 +28,7 @@ def main() -> int:
             raise ValueError("unknown revision")
         if backup_revision != heads[0]:
             list(script.iterate_revisions(heads[0], backup_revision))
-    except (RangeNotAncestorError, ValueError):
+    except (CommandError, RangeNotAncestorError, ResolutionError, ValueError):
         print("FAIL: backup Alembic revision is unknown or newer than this checkout", file=sys.stderr)
         return 1
     print(f"PASS: backup revision {backup_revision} can upgrade to {heads[0]}")

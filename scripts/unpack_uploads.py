@@ -44,6 +44,7 @@ def main() -> int:
                 raise ValueError(f"cannot read upload {normalized}")
             with (destination / normalized).open("xb") as output:
                 shutil.copyfileobj(source, output)
+    (destination / ".gitkeep").touch(exist_ok=True)
     return 0
 
 
