@@ -55,8 +55,10 @@ def backfill(batch_size: int, dry_run: bool) -> int:
                 db.expire_all()
                 updated = 0
                 for (chunk_id, page_id, original_content, original_title), vector in zip(snapshots, vectors, strict=True):
-                    chunk = db.get(Chunk, chunk_id)
-                    page = db.get(Page, page_id)
+                    # Lock both inputs used to form the embedding until commit.
+                    # This closes the check/flush race with API edits on Postgres.
+                    page = db.scalar(select(Page).where(Page.id == page_id).with_for_update())
+                    chunk = db.scalar(select(Chunk).where(Chunk.id == chunk_id).with_for_update())
                     if (
                         chunk is None
                         or page is None

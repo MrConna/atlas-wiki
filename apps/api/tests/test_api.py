@@ -1,7 +1,9 @@
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 
-from app.database import Base, engine
+from app.database import Base, SessionLocal, engine
 from app.main import app
+from app.models import Chunk
 
 
 client = TestClient(app)
@@ -203,6 +205,26 @@ def test_page_slug_remains_stable_after_rename():
     renamed = client.patch(f"/api/v1/pages/{page['id']}", json={"title": "New Display Name"}).json()
     assert renamed["title"] == "New Display Name"
     assert renamed["slug"] == "stable-link"
+
+
+def test_page_rename_invalidates_existing_native_embeddings():
+    page = client.post(
+        "/api/v1/pages", json={"title": "Old Title", "content": "content to embed"}
+    ).json()
+    with SessionLocal() as db:
+        chunk = db.scalar(select(Chunk).where(Chunk.page_id == page["id"]))
+        chunk.embedding = [1.0] + [0.0] * 767
+        chunk.embedding_model = "test-model"
+        chunk.embedding_version = "test-version"
+        from datetime import datetime, timezone
+        chunk.embedding_updated_at = datetime.now(timezone.utc)
+        db.commit()
+
+    assert client.patch(f"/api/v1/pages/{page['id']}", json={"title": "New Title"}).status_code == 200
+    with SessionLocal() as db:
+        chunks = db.scalars(select(Chunk).where(Chunk.page_id == page["id"])).all()
+        assert chunks
+        assert all(chunk.embedding is None and chunk.embedding_model is None for chunk in chunks)
 
 
 def test_document_response_hides_internal_storage_path():

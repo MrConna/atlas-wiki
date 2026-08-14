@@ -15,15 +15,47 @@ EXPECTED = {
     "chunks": {"id", "page_id", "content", "heading_path", "source_location", "position", "embedding"},
 }
 
+EXPECTED_COLUMNS = {
+    "pages": {
+        "id": (sa.String, 36, False), "title": (sa.String, 240, False),
+        "slug": (sa.String, 260, False), "content": (sa.Text, None, False),
+        "source_type": (sa.String, 32, False), "created_at": (sa.DateTime, None, False),
+        "updated_at": (sa.DateTime, None, False),
+    },
+    "documents": {
+        "id": (sa.String, 36, False), "page_id": (sa.String, 36, False),
+        "filename": (sa.String, 255, False), "media_type": (sa.String, 100, False),
+        "content_hash": (sa.String, 64, False), "storage_path": (sa.String, 500, False),
+        "size_bytes": (sa.Integer, None, False), "status": (sa.String, 32, False),
+        "created_at": (sa.DateTime, None, False),
+    },
+    "chunks": {
+        "id": (sa.String, 36, False), "page_id": (sa.String, 36, False),
+        "content": (sa.Text, None, False), "heading_path": (sa.String, 500, True),
+        "source_location": (sa.String, 240, True), "position": (sa.Integer, None, False),
+        "embedding": (sa.JSON, None, True),
+    },
+}
+
 
 def _validate_existing_schema(inspector) -> None:
     for table, required in EXPECTED.items():
-        columns = {column["name"] for column in inspector.get_columns(table)}
+        inspected_columns = inspector.get_columns(table)
+        columns = {column["name"] for column in inspected_columns}
         if not required <= columns:
             raise RuntimeError(f"Atlas table {table} is missing required baseline columns")
         primary_key = set(inspector.get_pk_constraint(table).get("constrained_columns") or [])
         if primary_key != {"id"}:
             raise RuntimeError(f"Atlas table {table} does not have the expected primary key")
+        by_name = {column["name"]: column for column in inspected_columns}
+        for name, (type_class, length, nullable) in EXPECTED_COLUMNS[table].items():
+            column = by_name[name]
+            if not isinstance(column["type"], type_class):
+                raise RuntimeError(f"Atlas table {table}.{name} has an unexpected type")
+            if length is not None and getattr(column["type"], "length", None) != length:
+                raise RuntimeError(f"Atlas table {table}.{name} has an unexpected length")
+            if column["nullable"] is not nullable:
+                raise RuntimeError(f"Atlas table {table}.{name} has unexpected nullability")
 
     unique_columns = {
         table: {
@@ -46,10 +78,19 @@ def _validate_existing_schema(inspector) -> None:
             fk.get("referred_table") == "pages"
             and fk.get("constrained_columns") == ["page_id"]
             and fk.get("referred_columns") == ["id"]
+            and (fk.get("options") or {}).get("ondelete", "").upper() == "CASCADE"
             for fk in inspector.get_foreign_keys(table)
         )
         if not valid_fk:
-            raise RuntimeError(f"Atlas table {table}.page_id is missing its pages foreign key")
+            raise RuntimeError(f"Atlas table {table}.page_id is missing its cascading pages foreign key")
+
+    indexes = {
+        table: {tuple(index.get("column_names") or []) for index in inspector.get_indexes(table)}
+        for table in EXPECTED
+    }
+    for table, columns in (("pages", ("title",)), ("chunks", ("page_id",))):
+        if columns not in indexes[table]:
+            raise RuntimeError(f"Atlas table {table} is missing its expected index on {columns[0]}")
 
 
 def upgrade() -> None:
