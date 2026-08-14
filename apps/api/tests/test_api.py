@@ -1,12 +1,16 @@
-from fastapi.testclient import TestClient
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+import threading
 from pathlib import Path
+from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
 from sqlalchemy import select, text
 
 from app.database import Base, SessionLocal, engine
 from app.embeddings import EmbeddingError
 from app.main import app
-from app.models import Chunk
+from app.models import Chunk, Document
 
 
 client = TestClient(app)
@@ -71,7 +75,7 @@ def test_readiness_native_provider_failure_is_not_ready(monkeypatch, tmp_path):
     monkeypatch.setattr("app.main.settings.embedding_provider", "ollama")
 
     class FailingProvider:
-        def resolve_identity(self):
+        def resolve_identity_for_readiness(self):
             raise EmbeddingError("private upstream failure")
 
     monkeypatch.setattr("app.main.get_embedding_provider", lambda: FailingProvider())
@@ -84,6 +88,78 @@ def test_readiness_native_provider_failure_is_not_ready(monkeypatch, tmp_path):
         "reason": "embedding_provider_unavailable",
     }
     assert "private upstream failure" not in response.text
+
+
+def test_readiness_rejects_same_length_upload_tampering(monkeypatch, tmp_path):
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.embedding_provider", "legacy")
+    imported = client.post(
+        "/api/v1/imports",
+        files={"file": ("source.txt", b"trusted bytes", "text/plain")},
+    )
+    assert imported.status_code == 201
+    with SessionLocal() as db:
+        document = db.scalar(select(Document))
+        stored_path = Path(document.storage_path)
+    stored_path.write_bytes(b"altered bytes")
+    assert stored_path.stat().st_size == len(b"trusted bytes")
+    prepare_readiness_database(monkeypatch, tmp_path)
+
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["storage"] == {
+        "status": "not_ready",
+        "reason": "storage_inconsistent",
+    }
+
+
+def test_hanging_identity_probe_holds_no_database_session(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.embedding_provider", "ollama")
+    entered_provider = threading.Event()
+    release_provider = threading.Event()
+    session_lock = threading.Lock()
+    active_sessions = 0
+    real_session_factory = SessionLocal
+
+    @contextmanager
+    def tracked_session():
+        nonlocal active_sessions
+        session = real_session_factory()
+        with session_lock:
+            active_sessions += 1
+        try:
+            yield session
+        finally:
+            session.close()
+            with session_lock:
+                active_sessions -= 1
+
+    class HangingProvider:
+        def resolve_identity_for_readiness(self):
+            entered_provider.set()
+            assert release_provider.wait(timeout=2)
+            return SimpleNamespace(
+                value="ollama:test@sha256:abc:dim768:embeddinggemma-retrieval-v1"
+            )
+
+    monkeypatch.setattr("app.main.SessionLocal", tracked_session)
+    monkeypatch.setattr("app.main.get_embedding_provider", lambda: HangingProvider())
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(__import__("app.main", fromlist=["_readiness_report"])._readiness_report)
+        assert entered_provider.wait(timeout=2)
+        with session_lock:
+            assert active_sessions == 0
+        release_provider.set()
+        status_code, report = result.result(timeout=2)
+
+    assert status_code == 200
+    assert report["checks"]["retrieval"] == {
+        "status": "ready",
+        "backend": "native-pgvector",
+        "indexed": True,
+    }
 
 
 def test_page_search_and_delete_flow():

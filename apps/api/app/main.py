@@ -205,35 +205,45 @@ def _migration_head() -> str:
     return heads[0]
 
 
-def _storage_check(db: Session) -> dict[str, object]:
+def _storage_check(documents: list[tuple[str, str, int, str]]) -> dict[str, object]:
     root = Path(settings.upload_dir).resolve()
     if not root.is_dir():
         raise RuntimeError("upload directory is missing")
     descriptor, probe_name = tempfile.mkstemp(prefix=".atlas-ready-", dir=root)
     os.close(descriptor)
     Path(probe_name).unlink(missing_ok=True)
-    documents = db.execute(select(Document.id, Document.storage_path, Document.size_bytes)).all()
     referenced: set[Path] = set()
-    for _document_id, storage_path, size_bytes in documents:
+    for _document_id, storage_path, size_bytes, content_hash in documents:
         path = Path(storage_path).resolve()
         referenced.add(path)
         if root not in path.parents or not path.is_file() or path.stat().st_size != size_bytes:
             raise RuntimeError("document storage is inconsistent")
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != content_hash:
+            raise RuntimeError("document storage checksum does not match")
     for path in root.iterdir():
         if path.name == ".gitkeep":
             continue
         if path.is_symlink() or not path.is_file() or path.resolve() not in referenced:
             raise RuntimeError("upload directory contains an unsafe or unreferenced entry")
-    return {"status": "ready", "documents": len(documents)}
+    return {"status": "ready"}
 
 
 def _readiness_report() -> tuple[int, dict[str, object]]:
     checks: dict[str, object] = {}
     hard_failure = False
+    database_ready = False
+    documents: list[tuple[str, str, int, str]] = []
+    # Take only a short metadata snapshot here. File hashing and external model
+    # probes happen after this session has returned its connection to the pool.
     try:
         with SessionLocal() as db:
             db.execute(text("SELECT 1"))
             checks["database"] = {"status": "ready"}
+            database_ready = True
             expected_head = _migration_head()
             current_head = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
             migration_ready = current_head == expected_head
@@ -243,47 +253,60 @@ def _readiness_report() -> tuple[int, dict[str, object]]:
                 "expected": expected_head,
             }
             hard_failure = hard_failure or not migration_ready
-            try:
-                checks["storage"] = _storage_check(db)
-            except (OSError, RuntimeError):
-                checks["storage"] = {"status": "not_ready", "reason": "storage_inconsistent"}
-                hard_failure = True
-
-            provider_name = settings.embedding_provider.lower().strip()
-            if provider_name == "legacy":
-                checks["retrieval"] = {"status": "ready", "backend": "feature-hash"}
-            elif provider_name == "ollama":
-                try:
-                    provider = get_embedding_provider()
-                    if provider is None:
-                        raise EmbeddingError("Embedding provider is unavailable")
-                    identity = provider.resolve_identity().value
-                    total = db.scalar(select(func.count()).select_from(Chunk)) or 0
-                    current = db.scalar(
-                        select(func.count()).select_from(Chunk).where(
-                            Chunk.embedding.is_not(None),
-                            Chunk.embedding_model == identity,
-                            Chunk.embedding_version == PROMPT_SCHEMA_VERSION,
-                        )
-                    ) or 0
-                    retrieval_ready = current == total
-                    checks["retrieval"] = {
-                        "status": "ready" if retrieval_ready else "not_ready",
-                        "backend": "native-pgvector",
-                        "model_identity": identity,
-                        "total_chunks": total,
-                        "current_chunks": current,
-                    }
-                    hard_failure = hard_failure or not retrieval_ready
-                except EmbeddingError:
-                    checks["retrieval"] = {"status": "not_ready", "reason": "embedding_provider_unavailable"}
-                    hard_failure = True
-            else:
-                checks["retrieval"] = {"status": "not_ready", "reason": "unsupported_embedding_provider"}
-                hard_failure = True
+            documents = list(
+                db.execute(
+                    select(Document.id, Document.storage_path, Document.size_bytes, Document.content_hash)
+                ).all()
+            )
     except Exception:
         checks.setdefault("database", {"status": "not_ready"})
         checks.setdefault("migrations", {"status": "not_ready", "reason": "migration_check_failed"})
+        hard_failure = True
+
+    if database_ready:
+        try:
+            checks["storage"] = _storage_check(documents)
+        except (OSError, RuntimeError):
+            checks["storage"] = {"status": "not_ready", "reason": "storage_inconsistent"}
+            hard_failure = True
+
+    provider_name = settings.embedding_provider.lower().strip()
+    if provider_name == "legacy":
+        checks["retrieval"] = {"status": "ready", "backend": "feature-hash"}
+    elif provider_name == "ollama" and database_ready:
+        try:
+            provider = get_embedding_provider()
+            if provider is None:
+                raise EmbeddingError("Embedding provider is unavailable")
+            identity = provider.resolve_identity_for_readiness().value
+            # The potentially slow external call above owns no DB connection.
+            with SessionLocal() as db:
+                total = db.scalar(select(func.count()).select_from(Chunk)) or 0
+                current = db.scalar(
+                    select(func.count()).select_from(Chunk).where(
+                        Chunk.embedding.is_not(None),
+                        Chunk.embedding_model == identity,
+                        Chunk.embedding_version == PROMPT_SCHEMA_VERSION,
+                    )
+                ) or 0
+            retrieval_ready = current == total
+            checks["retrieval"] = {
+                "status": "ready" if retrieval_ready else "not_ready",
+                "backend": "native-pgvector",
+                "indexed": retrieval_ready,
+            }
+            hard_failure = hard_failure or not retrieval_ready
+        except EmbeddingError:
+            checks["retrieval"] = {"status": "not_ready", "reason": "embedding_provider_unavailable"}
+            hard_failure = True
+        except Exception:
+            checks["retrieval"] = {"status": "not_ready", "reason": "embedding_state_unavailable"}
+            hard_failure = True
+    elif provider_name == "ollama":
+        checks["retrieval"] = {"status": "not_ready", "reason": "database_unavailable"}
+        hard_failure = True
+    else:
+        checks["retrieval"] = {"status": "not_ready", "reason": "unsupported_embedding_provider"}
         hard_failure = True
 
     generation_status, generation_reason = _generation_configuration()

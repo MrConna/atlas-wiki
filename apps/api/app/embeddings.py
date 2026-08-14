@@ -60,21 +60,34 @@ class OllamaEmbeddingProvider:
         self._capacity = threading.BoundedSemaphore(concurrency)
         self._closed = False
         self._close_lock = threading.Lock()
+        self._identity_condition = threading.Condition()
+        self._identity_refreshing = False
+        self._identity_cache: tuple[float, EmbeddingIdentity] | None = None
+        self._identity_failure_until = 0.0
 
-    def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        attempts: int = 3,
+        queue_timeout: float | None = None,
+        **kwargs,
+    ) -> httpx.Response:
         if self._closed:
             raise EmbeddingError("Embedding provider is closed")
-        acquired = self._capacity.acquire(timeout=settings.embedding_queue_timeout_seconds)
+        acquired = self._capacity.acquire(
+            timeout=settings.embedding_queue_timeout_seconds if queue_timeout is None else queue_timeout
+        )
         if not acquired:
             raise EmbeddingError("Embedding provider is busy")
         try:
-            return self._request_with_retries(method, path, **kwargs)
+            return self._request_with_retries(method, path, attempts=attempts, **kwargs)
         finally:
             self._capacity.release()
 
-    def _request_with_retries(self, method: str, path: str, **kwargs) -> httpx.Response:
+    def _request_with_retries(self, method: str, path: str, *, attempts: int, **kwargs) -> httpx.Response:
         retry_statuses = {429, 502, 503, 504}
-        attempts = 3
         for attempt in range(attempts):
             try:
                 response = self.client.request(method, f"{self.base_url}{path}", **kwargs)
@@ -95,8 +108,7 @@ class OllamaEmbeddingProvider:
                 self._closed = True
                 self.client.close()
 
-    def resolve_identity(self) -> EmbeddingIdentity:
-        response = self._request("GET", "/api/tags")
+    def _identity_from_response(self, response: httpx.Response) -> EmbeddingIdentity:
         try:
             models = response.json().get("models", [])
         except (ValueError, AttributeError):
@@ -109,6 +121,56 @@ class OllamaEmbeddingProvider:
                     break
                 return EmbeddingIdentity(model=self.model, digest=digest)
         raise EmbeddingError("Configured embedding model is not installed")
+
+    def resolve_identity(self) -> EmbeddingIdentity:
+        return self._identity_from_response(self._request("GET", "/api/tags"))
+
+    def resolve_identity_for_readiness(self) -> EmbeddingIdentity:
+        """Resolve model identity with a short, cached, single-flight probe."""
+        timeout = settings.embedding_readiness_timeout_seconds
+        ttl = settings.embedding_identity_ttl_seconds
+        deadline = time.monotonic() + timeout
+        with self._identity_condition:
+            now = time.monotonic()
+            if self._identity_cache and self._identity_cache[0] > now:
+                return self._identity_cache[1]
+            if self._identity_failure_until > now:
+                raise EmbeddingError("Embedding readiness probe recently failed")
+            while self._identity_refreshing:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise EmbeddingError("Embedding readiness probe is busy")
+                self._identity_condition.wait(remaining)
+                now = time.monotonic()
+                if self._identity_cache and self._identity_cache[0] > now:
+                    return self._identity_cache[1]
+                if self._identity_failure_until > now:
+                    raise EmbeddingError("Embedding readiness probe recently failed")
+            self._identity_refreshing = True
+
+        try:
+            response = self._request(
+                "GET",
+                "/api/tags",
+                attempts=1,
+                queue_timeout=timeout,
+                timeout=httpx.Timeout(timeout),
+            )
+            identity = self._identity_from_response(response)
+        except Exception as exc:
+            with self._identity_condition:
+                self._identity_failure_until = time.monotonic() + ttl
+                self._identity_refreshing = False
+                self._identity_condition.notify_all()
+            if isinstance(exc, EmbeddingError):
+                raise
+            raise EmbeddingError("Embedding readiness probe failed") from None
+        with self._identity_condition:
+            self._identity_failure_until = 0.0
+            self._identity_cache = (time.monotonic() + ttl, identity)
+            self._identity_refreshing = False
+            self._identity_condition.notify_all()
+        return identity
 
     def _embed(self, inputs: list[str]) -> list[list[float]]:
         response = self._request(

@@ -148,3 +148,29 @@ def test_lifecycle_provider_is_singleton_and_closes_once(monkeypatch):
     assert first is second
     assert len(created) == 1
     assert created[0].close_calls == 1
+
+
+def test_readiness_identity_probe_is_cached_and_single_flight(monkeypatch):
+    calls = 0
+    lock = threading.Lock()
+
+    def handler(_request: httpx.Request):
+        nonlocal calls
+        with lock:
+            calls += 1
+        time.sleep(0.05)
+        return httpx.Response(
+            200,
+            json={"models": [{"name": "embeddinggemma:300m-qat-q4_0", "digest": "sha256:abc"}]},
+        )
+
+    monkeypatch.setattr("app.embeddings.settings.embedding_identity_ttl_seconds", 10)
+    provider = OllamaEmbeddingProvider(transport=httpx.MockTransport(handler))
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        identities = list(executor.map(lambda _index: provider.resolve_identity_for_readiness(), range(6)))
+    provider.close()
+
+    assert calls == 1
+    assert {identity.value for identity in identities} == {
+        f"ollama:embeddinggemma:300m-qat-q4_0@sha256:abc:dim768:{PROMPT_SCHEMA_VERSION}"
+    }
