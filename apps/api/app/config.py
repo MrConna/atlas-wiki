@@ -17,6 +17,18 @@ class Settings(BaseSettings):
     openai_base_url: str = "https://api.openai.com/v1"
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
+    model_connect_timeout_seconds: float = Field(default=5, ge=0.1, le=60)
+    model_read_timeout_seconds: float = Field(default=120, ge=1, le=600)
+    model_write_timeout_seconds: float = Field(default=10, ge=1, le=120)
+    model_pool_timeout_seconds: float = Field(default=2, ge=0.1, le=60)
+    model_total_timeout_seconds: float = Field(default=150, ge=1, le=900)
+    model_queue_timeout_seconds: float = Field(default=1, ge=0.05, le=60)
+    model_max_retries: int = Field(default=2, ge=0, le=5)
+    model_retry_base_seconds: float = Field(default=0.5, ge=0, le=10)
+    model_max_concurrency: int = Field(default=4, ge=1, le=64)
+    model_max_tokens: int = Field(default=2048, ge=64, le=32768)
+    model_max_prompt_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
+    model_max_response_chars: int = Field(default=100_000, ge=1000, le=2_000_000)
     ollama_base_url: str = "http://host.docker.internal:11434"
     embedding_provider: str = "legacy"
     embedding_model: str = "embeddinggemma:300m-qat-q4_0"

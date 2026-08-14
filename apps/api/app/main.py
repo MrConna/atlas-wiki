@@ -22,7 +22,7 @@ from .config import settings
 from .database import SessionLocal, get_db
 from .embeddings import PROMPT_SCHEMA_VERSION, EmbeddingError, get_embedding_provider
 from .models import Chunk, Document, Page
-from .providers import generate_answer
+from .providers import ModelProviderError, generate_answer
 from .retrieval import chunk_text, cosine_similarity, embed_text, keyword_score
 from .schemas import (
     AskRequest,
@@ -561,8 +561,11 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
         )
     try:
         generated = await generate_answer(payload.question, [chunk.content for chunk, _page, _score in rows])
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=f"Model provider failed: {type(exc).__name__}") from exc
+    except ModelProviderError as exc:
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"code": exc.code, "message": str(exc), "retryable": exc.retryable},
+        ) from None
     if generated is None:
         return AskResponse(
             answer="Relevant evidence was found. Configure MODEL_PROVIDER and MODEL_NAME to generate a grounded answer.",
