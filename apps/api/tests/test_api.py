@@ -1,12 +1,14 @@
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
-import threading
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
+import pytest
 from sqlalchemy import select, text
 
+from app import main as main_module
 from app.database import Base, SessionLocal, engine
 from app.embeddings import EmbeddingError
 from app.main import app
@@ -34,6 +36,7 @@ def prepare_readiness_database(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("app.main.settings.embedding_provider", "legacy")
     monkeypatch.setattr("app.main.settings.model_provider", "none")
     monkeypatch.setattr("app.main.generation_failure_code", None)
+    main_module._reset_storage_readiness_cache()
 
 
 def test_readiness_reports_ready_without_optional_generation(monkeypatch, tmp_path):
@@ -160,6 +163,63 @@ def test_hanging_identity_probe_holds_no_database_session(monkeypatch, tmp_path)
         "backend": "native-pgvector",
         "indexed": True,
     }
+
+
+def test_storage_readiness_is_single_flight_and_cached(monkeypatch, tmp_path):
+    main_module._reset_storage_readiness_cache()
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.storage_readiness_wait_seconds", 1)
+    calls = 0
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_check(_documents):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=2)
+        return {"status": "ready"}
+
+    monkeypatch.setattr("app.main._storage_check", slow_check)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(main_module._cached_storage_check, []) for _index in range(6)]
+        assert entered.wait(timeout=2)
+        release.set()
+        assert [future.result(timeout=2) for future in futures] == [{"status": "ready"}] * 6
+    assert calls == 1
+
+    assert main_module._cached_storage_check([]) == {"status": "ready"}
+    assert calls == 1
+
+
+def test_storage_readiness_failure_cache_expires_and_recovers(monkeypatch, tmp_path):
+    main_module._reset_storage_readiness_cache()
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.storage_readiness_failure_ttl_seconds", 5)
+    clock = [100.0]
+    calls = 0
+
+    def monotonic():
+        return clock[0]
+
+    def flaky_check(_documents):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("disk temporarily unavailable")
+        return {"status": "ready"}
+
+    monkeypatch.setattr("app.main.time.monotonic", monotonic)
+    monkeypatch.setattr("app.main._storage_check", flaky_check)
+    with pytest.raises(RuntimeError):
+        main_module._cached_storage_check([])
+    with pytest.raises(RuntimeError):
+        main_module._cached_storage_check([])
+    assert calls == 1
+
+    clock[0] += 6
+    assert main_module._cached_storage_check([]) == {"status": "ready"}
+    assert calls == 2
 
 
 def test_page_search_and_delete_flow():

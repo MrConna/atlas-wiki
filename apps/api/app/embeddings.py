@@ -82,6 +82,8 @@ class OllamaEmbeddingProvider:
         if not acquired:
             raise EmbeddingError("Embedding provider is busy")
         try:
+            if self._closed:
+                raise EmbeddingError("Embedding provider is closed")
             return self._request_with_retries(method, path, attempts=attempts, **kwargs)
         finally:
             self._capacity.release()
@@ -106,6 +108,8 @@ class OllamaEmbeddingProvider:
         with self._close_lock:
             if not self._closed:
                 self._closed = True
+                with self._identity_condition:
+                    self._identity_condition.notify_all()
                 self.client.close()
 
     def _identity_from_response(self, response: httpx.Response) -> EmbeddingIdentity:
@@ -131,6 +135,8 @@ class OllamaEmbeddingProvider:
         ttl = settings.embedding_identity_ttl_seconds
         deadline = time.monotonic() + timeout
         with self._identity_condition:
+            if self._closed:
+                raise EmbeddingError("Embedding provider is closed")
             now = time.monotonic()
             if self._identity_cache and self._identity_cache[0] > now:
                 return self._identity_cache[1]
@@ -141,6 +147,8 @@ class OllamaEmbeddingProvider:
                 if remaining <= 0:
                     raise EmbeddingError("Embedding readiness probe is busy")
                 self._identity_condition.wait(remaining)
+                if self._closed:
+                    raise EmbeddingError("Embedding provider is closed")
                 now = time.monotonic()
                 if self._identity_cache and self._identity_cache[0] > now:
                     return self._identity_cache[1]
@@ -157,6 +165,8 @@ class OllamaEmbeddingProvider:
                 timeout=httpx.Timeout(timeout),
             )
             identity = self._identity_from_response(response)
+            if self._closed:
+                raise EmbeddingError("Embedding provider is closed")
         except Exception as exc:
             with self._identity_condition:
                 self._identity_failure_until = time.monotonic() + ttl

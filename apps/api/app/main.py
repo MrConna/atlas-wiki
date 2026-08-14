@@ -4,6 +4,7 @@ import os
 import re
 import tempfile
 import threading
+import time
 import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -106,6 +107,7 @@ def populate_native_embeddings(title: str, chunks: list[Chunk]) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _reset_storage_readiness_cache()
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     with SessionLocal() as db:
@@ -232,6 +234,73 @@ def _storage_check(documents: list[tuple[str, str, int, str]]) -> dict[str, obje
     return {"status": "ready"}
 
 
+storage_readiness_condition = threading.Condition()
+storage_readiness_refreshing = False
+storage_readiness_cache: tuple[tuple[str, tuple[tuple[str, str, int, str], ...]], float, bool] | None = None
+
+
+def _cached_storage_check(documents: list[tuple[str, str, int, str]]) -> dict[str, object]:
+    global storage_readiness_cache, storage_readiness_refreshing
+    normalized_documents = tuple(
+        sorted((str(document_id), str(path), int(size), str(digest)) for document_id, path, size, digest in documents)
+    )
+    snapshot = (str(Path(settings.upload_dir).resolve()), normalized_documents)
+    deadline = time.monotonic() + settings.storage_readiness_wait_seconds
+    with storage_readiness_condition:
+        while True:
+            now = time.monotonic()
+            if (
+                storage_readiness_cache is not None
+                and storage_readiness_cache[0] == snapshot
+                and storage_readiness_cache[1] > now
+            ):
+                if storage_readiness_cache[2]:
+                    return {"status": "ready"}
+                raise RuntimeError("storage readiness recently failed")
+            if not storage_readiness_refreshing:
+                storage_readiness_refreshing = True
+                break
+            remaining = deadline - now
+            if remaining <= 0:
+                raise RuntimeError("storage readiness check is busy")
+            storage_readiness_condition.wait(remaining)
+
+    try:
+        result = _storage_check(documents)
+    except Exception:
+        with storage_readiness_condition:
+            storage_readiness_cache = (
+                snapshot,
+                time.monotonic() + settings.storage_readiness_failure_ttl_seconds,
+                False,
+            )
+            storage_readiness_refreshing = False
+            storage_readiness_condition.notify_all()
+        raise RuntimeError("storage readiness failed") from None
+    except BaseException:
+        with storage_readiness_condition:
+            storage_readiness_refreshing = False
+            storage_readiness_condition.notify_all()
+        raise
+    with storage_readiness_condition:
+        storage_readiness_cache = (
+            snapshot,
+            time.monotonic() + settings.storage_readiness_ttl_seconds,
+            True,
+        )
+        storage_readiness_refreshing = False
+        storage_readiness_condition.notify_all()
+    return result
+
+
+def _reset_storage_readiness_cache() -> None:
+    global storage_readiness_cache, storage_readiness_refreshing
+    with storage_readiness_condition:
+        storage_readiness_cache = None
+        storage_readiness_refreshing = False
+        storage_readiness_condition.notify_all()
+
+
 def _readiness_report() -> tuple[int, dict[str, object]]:
     checks: dict[str, object] = {}
     hard_failure = False
@@ -265,7 +334,7 @@ def _readiness_report() -> tuple[int, dict[str, object]]:
 
     if database_ready:
         try:
-            checks["storage"] = _storage_check(documents)
+            checks["storage"] = _cached_storage_check(documents)
         except (OSError, RuntimeError):
             checks["storage"] = {"status": "not_ready", "reason": "storage_inconsistent"}
             hard_failure = True
