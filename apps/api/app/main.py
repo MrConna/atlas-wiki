@@ -4,23 +4,34 @@ import os
 import re
 import tempfile
 import threading
+import time
 import unicodedata
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from starlette.concurrency import run_in_threadpool
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 from pypdf import PdfReader
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import SessionLocal, get_db
-from .embeddings import PROMPT_SCHEMA_VERSION, EmbeddingError, get_embedding_provider
+from .embeddings import (
+    PROMPT_SCHEMA_VERSION,
+    EmbeddingError,
+    close_embedding_provider,
+    get_embedding_provider,
+    initialize_embedding_provider,
+)
 from .models import Chunk, Document, Page
 from .providers import ModelProviderError, generate_answer
 from .retrieval import chunk_text, cosine_similarity, embed_text, keyword_score
@@ -87,8 +98,6 @@ def populate_native_embeddings(title: str, chunks: list[Chunk]) -> None:
         vectors = provider.embed_documents([(title, chunk.content) for chunk in chunks])
     except EmbeddingError as exc:
         raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
-    finally:
-        provider.close()
     for chunk, vector in zip(chunks, vectors, strict=True):
         chunk.embedding = vector
         chunk.embedding_model = identity
@@ -98,6 +107,7 @@ def populate_native_embeddings(title: str, chunks: list[Chunk]) -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    _reset_storage_readiness_cache()
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     with SessionLocal() as db:
@@ -117,7 +127,17 @@ async def lifespan(_app: FastAPI):
             and candidate.name not in referenced
         ):
             candidate.unlink(missing_ok=True)
-    yield
+    if settings.embedding_provider == "ollama":
+        try:
+            initialize_embedding_provider()
+        except EmbeddingError:
+            # Readiness reports provider startup failures without taking away
+            # the cheap process liveness endpoint.
+            pass
+    try:
+        yield
+    finally:
+        close_embedding_provider()
 
 
 app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
@@ -145,6 +165,234 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _generation_configuration() -> tuple[str, str | None]:
+    provider = settings.model_provider.lower().strip()
+    if provider == "none":
+        return "disabled", None
+    if provider not in {"deepseek", "openai", "ollama"}:
+        return "degraded", "unsupported_provider"
+    if not settings.model_name.strip():
+        return "degraded", "missing_model"
+    if provider == "deepseek":
+        base_url, api_key = settings.deepseek_base_url, settings.deepseek_api_key
+    elif provider == "openai":
+        base_url, api_key = settings.openai_base_url, settings.openai_api_key
+    else:
+        base_url, api_key = settings.ollama_base_url, "local"
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.username or parsed.password:
+        return "degraded", "invalid_base_url"
+    if provider in {"deepseek", "openai"} and not api_key.strip():
+        return "degraded", "missing_api_key"
+    with generation_state_lock:
+        last_failure = generation_failure_code
+    if last_failure:
+        return "degraded", last_failure
+    return "configured", None
+
+
+def _record_generation_failure(code: str | None) -> None:
+    global generation_failure_code
+    with generation_state_lock:
+        generation_failure_code = code
+
+
+def _migration_head() -> str:
+    api_dir = Path(__file__).resolve().parents[1]
+    config = Config(str(api_dir / "alembic.ini"))
+    config.set_main_option("script_location", str(api_dir / "migrations"))
+    heads = ScriptDirectory.from_config(config).get_heads()
+    if len(heads) != 1:
+        raise RuntimeError("repository does not have exactly one migration head")
+    return heads[0]
+
+
+def _storage_check(documents: list[tuple[str, str, int, str]]) -> dict[str, object]:
+    root = Path(settings.upload_dir).resolve()
+    if not root.is_dir():
+        raise RuntimeError("upload directory is missing")
+    descriptor, probe_name = tempfile.mkstemp(prefix=".atlas-ready-", dir=root)
+    os.close(descriptor)
+    Path(probe_name).unlink(missing_ok=True)
+    referenced: set[Path] = set()
+    for _document_id, storage_path, size_bytes, content_hash in documents:
+        path = Path(storage_path).resolve()
+        referenced.add(path)
+        if root not in path.parents or not path.is_file() or path.stat().st_size != size_bytes:
+            raise RuntimeError("document storage is inconsistent")
+        digest = hashlib.sha256()
+        with path.open("rb") as source:
+            for block in iter(lambda: source.read(1024 * 1024), b""):
+                digest.update(block)
+        if digest.hexdigest() != content_hash:
+            raise RuntimeError("document storage checksum does not match")
+    for path in root.iterdir():
+        if path.name == ".gitkeep":
+            continue
+        if path.is_symlink() or not path.is_file() or path.resolve() not in referenced:
+            raise RuntimeError("upload directory contains an unsafe or unreferenced entry")
+    return {"status": "ready"}
+
+
+storage_readiness_condition = threading.Condition()
+storage_readiness_refreshing = False
+storage_readiness_cache: tuple[tuple[str, tuple[tuple[str, str, int, str], ...]], float, bool] | None = None
+
+
+def _cached_storage_check(documents: list[tuple[str, str, int, str]]) -> dict[str, object]:
+    global storage_readiness_cache, storage_readiness_refreshing
+    normalized_documents = tuple(
+        sorted((str(document_id), str(path), int(size), str(digest)) for document_id, path, size, digest in documents)
+    )
+    snapshot = (str(Path(settings.upload_dir).resolve()), normalized_documents)
+    deadline = time.monotonic() + settings.storage_readiness_wait_seconds
+    with storage_readiness_condition:
+        while True:
+            now = time.monotonic()
+            if (
+                storage_readiness_cache is not None
+                and storage_readiness_cache[0] == snapshot
+                and storage_readiness_cache[1] > now
+            ):
+                if storage_readiness_cache[2]:
+                    return {"status": "ready"}
+                raise RuntimeError("storage readiness recently failed")
+            if not storage_readiness_refreshing:
+                storage_readiness_refreshing = True
+                break
+            remaining = deadline - now
+            if remaining <= 0:
+                raise RuntimeError("storage readiness check is busy")
+            storage_readiness_condition.wait(remaining)
+
+    try:
+        result = _storage_check(documents)
+    except Exception:
+        with storage_readiness_condition:
+            storage_readiness_cache = (
+                snapshot,
+                time.monotonic() + settings.storage_readiness_failure_ttl_seconds,
+                False,
+            )
+            storage_readiness_refreshing = False
+            storage_readiness_condition.notify_all()
+        raise RuntimeError("storage readiness failed") from None
+    except BaseException:
+        with storage_readiness_condition:
+            storage_readiness_refreshing = False
+            storage_readiness_condition.notify_all()
+        raise
+    with storage_readiness_condition:
+        storage_readiness_cache = (
+            snapshot,
+            time.monotonic() + settings.storage_readiness_ttl_seconds,
+            True,
+        )
+        storage_readiness_refreshing = False
+        storage_readiness_condition.notify_all()
+    return result
+
+
+def _reset_storage_readiness_cache() -> None:
+    global storage_readiness_cache, storage_readiness_refreshing
+    with storage_readiness_condition:
+        storage_readiness_cache = None
+        storage_readiness_refreshing = False
+        storage_readiness_condition.notify_all()
+
+
+def _readiness_report() -> tuple[int, dict[str, object]]:
+    checks: dict[str, object] = {}
+    hard_failure = False
+    database_ready = False
+    documents: list[tuple[str, str, int, str]] = []
+    # Take only a short metadata snapshot here. File hashing and external model
+    # probes happen after this session has returned its connection to the pool.
+    try:
+        with SessionLocal() as db:
+            db.execute(text("SELECT 1"))
+            checks["database"] = {"status": "ready"}
+            database_ready = True
+            expected_head = _migration_head()
+            current_head = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one()
+            migration_ready = current_head == expected_head
+            checks["migrations"] = {
+                "status": "ready" if migration_ready else "not_ready",
+                "current": current_head,
+                "expected": expected_head,
+            }
+            hard_failure = hard_failure or not migration_ready
+            documents = list(
+                db.execute(
+                    select(Document.id, Document.storage_path, Document.size_bytes, Document.content_hash)
+                ).all()
+            )
+    except Exception:
+        checks.setdefault("database", {"status": "not_ready"})
+        checks.setdefault("migrations", {"status": "not_ready", "reason": "migration_check_failed"})
+        hard_failure = True
+
+    if database_ready:
+        try:
+            checks["storage"] = _cached_storage_check(documents)
+        except (OSError, RuntimeError):
+            checks["storage"] = {"status": "not_ready", "reason": "storage_inconsistent"}
+            hard_failure = True
+
+    provider_name = settings.embedding_provider.lower().strip()
+    if provider_name == "legacy":
+        checks["retrieval"] = {"status": "ready", "backend": "feature-hash"}
+    elif provider_name == "ollama" and database_ready:
+        try:
+            provider = get_embedding_provider()
+            if provider is None:
+                raise EmbeddingError("Embedding provider is unavailable")
+            identity = provider.resolve_identity_for_readiness().value
+            # The potentially slow external call above owns no DB connection.
+            with SessionLocal() as db:
+                total = db.scalar(select(func.count()).select_from(Chunk)) or 0
+                current = db.scalar(
+                    select(func.count()).select_from(Chunk).where(
+                        Chunk.embedding.is_not(None),
+                        Chunk.embedding_model == identity,
+                        Chunk.embedding_version == PROMPT_SCHEMA_VERSION,
+                    )
+                ) or 0
+            retrieval_ready = current == total
+            checks["retrieval"] = {
+                "status": "ready" if retrieval_ready else "not_ready",
+                "backend": "native-pgvector",
+                "indexed": retrieval_ready,
+            }
+            hard_failure = hard_failure or not retrieval_ready
+        except EmbeddingError:
+            checks["retrieval"] = {"status": "not_ready", "reason": "embedding_provider_unavailable"}
+            hard_failure = True
+        except Exception:
+            checks["retrieval"] = {"status": "not_ready", "reason": "embedding_state_unavailable"}
+            hard_failure = True
+    elif provider_name == "ollama":
+        checks["retrieval"] = {"status": "not_ready", "reason": "database_unavailable"}
+        hard_failure = True
+    else:
+        checks["retrieval"] = {"status": "not_ready", "reason": "unsupported_embedding_provider"}
+        hard_failure = True
+
+    generation_status, generation_reason = _generation_configuration()
+    generation: dict[str, str] = {"status": generation_status}
+    if generation_reason:
+        generation["reason"] = generation_reason
+    checks["generation"] = generation
+    overall = "not_ready" if hard_failure else "degraded" if generation_status == "degraded" else "ready"
+    return (503 if hard_failure else 200), {"status": overall, "checks": checks}
+
+
+@app.get("/api/v1/ready")
+def readiness():
+    status_code, report = _readiness_report()
+    return JSONResponse(status_code=status_code, content=report)
+
+
 @app.get("/api/v1/pages", response_model=list[PageRead])
 def list_pages(db: Session = Depends(get_db)):
     return db.scalars(select(Page).order_by(Page.updated_at.desc())).all()
@@ -156,6 +404,8 @@ def list_documents(db: Session = Depends(get_db)):
 
 
 storage_lock = threading.Lock()
+generation_state_lock = threading.Lock()
+generation_failure_code: str | None = None
 
 
 def extract_text(filename: str, media_type: str, data: bytes) -> str:
@@ -380,8 +630,6 @@ def search_native_chunks(db: Session, query: str, limit: int, mode: str) -> list
         query_embeddings = provider.embed_queries(query_parts)
     except EmbeddingError as exc:
         raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
-    finally:
-        provider.close()
 
     candidate_limit = max(limit * 5, settings.retrieval_candidate_limit)
     eligible = (
@@ -504,8 +752,6 @@ def retrieval_status(db: Session = Depends(get_db)):
         identity = provider.resolve_identity().value
     except EmbeddingError as exc:
         raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
-    finally:
-        provider.close()
     current = db.scalar(
         select(func.count()).select_from(Chunk).where(
             Chunk.embedding.is_not(None),
@@ -562,10 +808,13 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
     try:
         generated = await generate_answer(payload.question, [chunk.content for chunk, _page, _score in rows])
     except ModelProviderError as exc:
+        _record_generation_failure(exc.code)
         raise HTTPException(
             status_code=exc.status_code,
             detail={"code": exc.code, "message": str(exc), "retryable": exc.retryable},
         ) from None
+    if generated is not None:
+        _record_generation_failure(None)
     if generated is None:
         return AskResponse(
             answer="Relevant evidence was found. Configure MODEL_PROVIDER and MODEL_NAME to generate a grounded answer.",

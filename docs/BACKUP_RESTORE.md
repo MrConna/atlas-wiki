@@ -34,9 +34,11 @@ Use the same or a newer Atlas checkout. Start only the database, then restore:
 docker compose up -d db
 scripts/restore.sh /secure/path/atlas-20260814T120000Z.tar.gz
 docker compose up -d api web
-docker compose exec api alembic upgrade head
-docker compose exec api python scripts/verify_storage.py
 ```
+
+`restore.sh` validates revision compatibility, upgrades to the repository's
+single Alembic head, and runs storage verification while application services
+remain stopped. Do not start or migrate the API separately before it succeeds.
 
 Restore verifies component checksums before changing anything and refuses to
 overwrite a non-empty database or uploads directory. This deliberately makes
@@ -45,7 +47,7 @@ approved migration plan. `verify_storage.py` checks the Alembic version,
 document/page/chunk references, file presence, sizes, hashes, path containment,
 and orphan files without modifying data.
 
-After verification, test health, open an imported document, run keyword and
+After verification, test readiness, open an imported document, run keyword and
 semantic searches, and run one cited Ask query. If the embedding model identity
 changed, run `python -m app.cli embeddings-backfill` and repeat retrieval gates.
 

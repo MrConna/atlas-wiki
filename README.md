@@ -19,6 +19,15 @@ docker compose up --build
 ```
 
 Open the web app at http://localhost:3000 and API docs at http://localhost:8000/docs.
+`/api/v1/health` is process liveness; `/api/v1/ready` verifies the database,
+migrations, storage, and configured embedding model. Compose waits for
+readiness before starting the web service.
+
+For non-default loopback ports, update `API_PORT`, `WEB_PORT`,
+`NEXT_PUBLIC_API_URL`, and `CORS_ORIGINS` in `.env`, then rebuild the web image.
+`NEXT_PUBLIC_API_URL` is compiled into the browser bundle and is not a runtime
+setting. Atlas has no authentication and must not be exposed to an untrusted
+LAN or the public internet.
 
 ## Model providers
 
@@ -92,6 +101,9 @@ Back up PostgreSQL and uploaded source files from one stopped-write window:
 ```bash
 scripts/backup.sh /secure/path/atlas-backup.tar.gz
 ```
+
+The generated archive contains document content and is **not encrypted by
+Atlas**. Store it only on encrypted storage or encrypt it before copying it.
 
 Restoration verifies checksums and refuses to overwrite non-empty data. See
 [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md) for clean-environment

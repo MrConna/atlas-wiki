@@ -1,8 +1,12 @@
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import httpx
 import pytest
 
+from app import embeddings
 from app.embeddings import EmbeddingError, OllamaEmbeddingProvider, PROMPT_SCHEMA_VERSION, _normalize
 
 
@@ -92,3 +96,120 @@ def test_embedding_provider_does_not_leak_response_body_on_error():
         provider.embed_query("query")
     assert "private document" not in str(error.value)
     provider.close()
+
+
+def test_embedding_provider_bounds_concurrent_requests(monkeypatch):
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    def handler(_request: httpx.Request):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return httpx.Response(200, json={"embeddings": [[1.0] + [0.0] * 767]})
+
+    monkeypatch.setattr("app.embeddings.settings.embedding_max_concurrency", 2)
+    provider = OllamaEmbeddingProvider(transport=httpx.MockTransport(handler))
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        vectors = list(executor.map(provider.embed_query, [f"query-{index}" for index in range(6)]))
+    provider.close()
+
+    assert len(vectors) == 6
+    assert peak == 2
+
+
+def test_lifecycle_provider_is_singleton_and_closes_once(monkeypatch):
+    created = []
+
+    class FakeProvider:
+        _closed = False
+
+        def __init__(self):
+            self.close_calls = 0
+            created.append(self)
+
+        def close(self):
+            self.close_calls += 1
+            self._closed = True
+
+    embeddings.close_embedding_provider()
+    monkeypatch.setattr(embeddings.settings, "embedding_provider", "ollama")
+    monkeypatch.setattr(embeddings, "OllamaEmbeddingProvider", FakeProvider)
+    first = embeddings.initialize_embedding_provider()
+    second = embeddings.get_embedding_provider()
+    embeddings.close_embedding_provider()
+    embeddings.close_embedding_provider()
+
+    assert first is second
+    assert len(created) == 1
+    assert created[0].close_calls == 1
+
+
+def test_readiness_identity_probe_is_cached_and_single_flight(monkeypatch):
+    calls = 0
+    lock = threading.Lock()
+
+    def handler(_request: httpx.Request):
+        nonlocal calls
+        with lock:
+            calls += 1
+        time.sleep(0.05)
+        return httpx.Response(
+            200,
+            json={"models": [{"name": "embeddinggemma:300m-qat-q4_0", "digest": "sha256:abc"}]},
+        )
+
+    monkeypatch.setattr("app.embeddings.settings.embedding_identity_ttl_seconds", 10)
+    provider = OllamaEmbeddingProvider(transport=httpx.MockTransport(handler))
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        identities = list(executor.map(lambda _index: provider.resolve_identity_for_readiness(), range(6)))
+    provider.close()
+
+    assert calls == 1
+    assert {identity.value for identity in identities} == {
+        f"ollama:embeddinggemma:300m-qat-q4_0@sha256:abc:dim768:{PROMPT_SCHEMA_VERSION}"
+    }
+
+
+def test_waiting_request_rechecks_closed_after_capacity_acquire(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+
+    def handler(_request: httpx.Request):
+        entered.set()
+        assert release.wait(timeout=2)
+        return httpx.Response(200, json={"embeddings": [[1.0] + [0.0] * 767]})
+
+    monkeypatch.setattr("app.embeddings.settings.embedding_max_concurrency", 1)
+    monkeypatch.setattr("app.embeddings.settings.embedding_queue_timeout_seconds", 1)
+    provider = OllamaEmbeddingProvider(transport=httpx.MockTransport(handler))
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(provider.embed_query, "first")
+        assert entered.wait(timeout=2)
+        second = executor.submit(provider.embed_query, "second")
+        time.sleep(0.03)
+        provider.close()
+        release.set()
+        assert len(first.result(timeout=2)) == 768
+        with pytest.raises(EmbeddingError, match="closed"):
+            second.result(timeout=2)
+
+
+def test_close_notifies_identity_readiness_waiters(monkeypatch):
+    monkeypatch.setattr("app.embeddings.settings.embedding_readiness_timeout_seconds", 2)
+    provider = OllamaEmbeddingProvider(
+        transport=httpx.MockTransport(lambda _request: pytest.fail("request should not be sent"))
+    )
+    with provider._identity_condition:
+        provider._identity_refreshing = True
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        waiting = executor.submit(provider.resolve_identity_for_readiness)
+        time.sleep(0.03)
+        provider.close()
+        with pytest.raises(EmbeddingError, match="closed"):
+            waiting.result(timeout=0.5)

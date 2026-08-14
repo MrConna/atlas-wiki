@@ -1,9 +1,18 @@
-from fastapi.testclient import TestClient
-from sqlalchemy import select
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import threading
+from types import SimpleNamespace
 
+from fastapi.testclient import TestClient
+import pytest
+from sqlalchemy import select, text
+
+from app import main as main_module
 from app.database import Base, SessionLocal, engine
+from app.embeddings import EmbeddingError
 from app.main import app
-from app.models import Chunk
+from app.models import Chunk, Document
 
 
 client = TestClient(app)
@@ -16,6 +25,201 @@ def setup_function():
 
 def test_health():
     assert client.get("/api/v1/health").json() == {"status": "ok"}
+
+
+def prepare_readiness_database(monkeypatch, tmp_path: Path):
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(128) NOT NULL)"))
+        connection.execute(text("INSERT INTO alembic_version VALUES ('0002_pgvector_embeddings')"))
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.embedding_provider", "legacy")
+    monkeypatch.setattr("app.main.settings.model_provider", "none")
+    monkeypatch.setattr("app.main.generation_failure_code", None)
+    main_module._reset_storage_readiness_cache()
+
+
+def test_readiness_reports_ready_without_optional_generation(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["checks"]["generation"]["status"] == "disabled"
+
+
+def test_readiness_generation_misconfiguration_is_degraded(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.model_provider", "deepseek")
+    monkeypatch.setattr("app.main.settings.model_name", "deepseek-v4-flash")
+    monkeypatch.setattr("app.main.settings.deepseek_api_key", "")
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["checks"]["generation"]["reason"] == "missing_api_key"
+
+
+def test_readiness_remembers_generation_failure_as_degraded(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.model_provider", "deepseek")
+    monkeypatch.setattr("app.main.settings.model_name", "deepseek-v4-flash")
+    monkeypatch.setattr("app.main.settings.deepseek_api_key", "configured-secret")
+    monkeypatch.setattr("app.main.generation_failure_code", "provider_unavailable")
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["checks"]["generation"]["reason"] == "provider_unavailable"
+
+
+def test_readiness_native_provider_failure_is_not_ready(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.embedding_provider", "ollama")
+
+    class FailingProvider:
+        def resolve_identity_for_readiness(self):
+            raise EmbeddingError("private upstream failure")
+
+    monkeypatch.setattr("app.main.get_embedding_provider", lambda: FailingProvider())
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+    assert response.json()["checks"]["retrieval"] == {
+        "status": "not_ready",
+        "reason": "embedding_provider_unavailable",
+    }
+    assert "private upstream failure" not in response.text
+
+
+def test_readiness_rejects_same_length_upload_tampering(monkeypatch, tmp_path):
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.embedding_provider", "legacy")
+    imported = client.post(
+        "/api/v1/imports",
+        files={"file": ("source.txt", b"trusted bytes", "text/plain")},
+    )
+    assert imported.status_code == 201
+    with SessionLocal() as db:
+        document = db.scalar(select(Document))
+        stored_path = Path(document.storage_path)
+    stored_path.write_bytes(b"altered bytes")
+    assert stored_path.stat().st_size == len(b"trusted bytes")
+    prepare_readiness_database(monkeypatch, tmp_path)
+
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 503
+    assert response.json()["checks"]["storage"] == {
+        "status": "not_ready",
+        "reason": "storage_inconsistent",
+    }
+
+
+def test_hanging_identity_probe_holds_no_database_session(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.embedding_provider", "ollama")
+    entered_provider = threading.Event()
+    release_provider = threading.Event()
+    session_lock = threading.Lock()
+    active_sessions = 0
+    real_session_factory = SessionLocal
+
+    @contextmanager
+    def tracked_session():
+        nonlocal active_sessions
+        session = real_session_factory()
+        with session_lock:
+            active_sessions += 1
+        try:
+            yield session
+        finally:
+            session.close()
+            with session_lock:
+                active_sessions -= 1
+
+    class HangingProvider:
+        def resolve_identity_for_readiness(self):
+            entered_provider.set()
+            assert release_provider.wait(timeout=2)
+            return SimpleNamespace(
+                value="ollama:test@sha256:abc:dim768:embeddinggemma-retrieval-v1"
+            )
+
+    monkeypatch.setattr("app.main.SessionLocal", tracked_session)
+    monkeypatch.setattr("app.main.get_embedding_provider", lambda: HangingProvider())
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        result = executor.submit(__import__("app.main", fromlist=["_readiness_report"])._readiness_report)
+        assert entered_provider.wait(timeout=2)
+        with session_lock:
+            assert active_sessions == 0
+        release_provider.set()
+        status_code, report = result.result(timeout=2)
+
+    assert status_code == 200
+    assert report["checks"]["retrieval"] == {
+        "status": "ready",
+        "backend": "native-pgvector",
+        "indexed": True,
+    }
+
+
+def test_storage_readiness_is_single_flight_and_cached(monkeypatch, tmp_path):
+    main_module._reset_storage_readiness_cache()
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.storage_readiness_wait_seconds", 1)
+    calls = 0
+    entered = threading.Event()
+    release = threading.Event()
+
+    def slow_check(_documents):
+        nonlocal calls
+        calls += 1
+        entered.set()
+        assert release.wait(timeout=2)
+        return {"status": "ready"}
+
+    monkeypatch.setattr("app.main._storage_check", slow_check)
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        futures = [executor.submit(main_module._cached_storage_check, []) for _index in range(6)]
+        assert entered.wait(timeout=2)
+        release.set()
+        assert [future.result(timeout=2) for future in futures] == [{"status": "ready"}] * 6
+    assert calls == 1
+
+    assert main_module._cached_storage_check([]) == {"status": "ready"}
+    assert calls == 1
+
+
+def test_storage_readiness_failure_cache_expires_and_recovers(monkeypatch, tmp_path):
+    main_module._reset_storage_readiness_cache()
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.storage_readiness_failure_ttl_seconds", 5)
+    clock = [100.0]
+    calls = 0
+
+    def monotonic():
+        return clock[0]
+
+    def flaky_check(_documents):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("disk temporarily unavailable")
+        return {"status": "ready"}
+
+    monkeypatch.setattr("app.main.time.monotonic", monotonic)
+    monkeypatch.setattr("app.main._storage_check", flaky_check)
+    with pytest.raises(RuntimeError):
+        main_module._cached_storage_check([])
+    with pytest.raises(RuntimeError):
+        main_module._cached_storage_check([])
+    assert calls == 1
+
+    clock[0] += 6
+    assert main_module._cached_storage_check([]) == {"status": "ready"}
+    assert calls == 2
 
 
 def test_page_search_and_delete_flow():

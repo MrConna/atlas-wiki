@@ -45,6 +45,10 @@ services:
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
       EMBEDDING_TIMEOUT_SECONDS: ${EMBEDDING_TIMEOUT_SECONDS:-60}
+      EMBEDDING_MAX_CONCURRENCY: ${EMBEDDING_MAX_CONCURRENCY:-4}
+      EMBEDDING_QUEUE_TIMEOUT_SECONDS: ${EMBEDDING_QUEUE_TIMEOUT_SECONDS:-2}
+      EMBEDDING_READINESS_TIMEOUT_SECONDS: ${EMBEDDING_READINESS_TIMEOUT_SECONDS:-2}
+      EMBEDDING_IDENTITY_TTL_SECONDS: ${EMBEDDING_IDENTITY_TTL_SECONDS:-10}
       SEMANTIC_MIN_SCORE: ${SEMANTIC_MIN_SCORE:-0.40}
       SEMANTIC_EXPANSION_MIN_SCORE: ${SEMANTIC_EXPANSION_MIN_SCORE:-0.38}
       HYBRID_MIN_SCORE: ${HYBRID_MIN_SCORE:-0.423}
@@ -52,9 +56,19 @@ services:
       UPLOAD_DIR: /app/uploads
       MAX_UPLOAD_BYTES: ${MAX_UPLOAD_BYTES:-10485760}
       MAX_STORAGE_BYTES: ${MAX_STORAGE_BYTES:-1073741824}
+      STORAGE_READINESS_TTL_SECONDS: ${STORAGE_READINESS_TTL_SECONDS:-30}
+      STORAGE_READINESS_FAILURE_TTL_SECONDS: ${STORAGE_READINESS_FAILURE_TTL_SECONDS:-5}
+      STORAGE_READINESS_WAIT_SECONDS: ${STORAGE_READINESS_WAIT_SECONDS:-2}
       ALLOWED_HOSTS: ${ALLOWED_HOSTS:-localhost,127.0.0.1,api,testserver}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
     depends_on:
       db:
         condition: service_healthy
@@ -64,13 +78,15 @@ services:
       - "host.docker.internal:host-gateway"
 
   web:
-    build: ./apps/web
-    environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+    build:
+      context: ./apps/web
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:${API_PORT:-8000}}
     ports:
       - "127.0.0.1:${WEB_PORT:-3000}:3000"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   atlas_db:
