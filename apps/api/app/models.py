@@ -1,10 +1,11 @@
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, CheckConstraint, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
+from .types import EmbeddingVector
 
 
 def utcnow() -> datetime:
@@ -42,6 +43,13 @@ class Document(Base):
 
 class Chunk(Base):
     __tablename__ = "chunks"
+    __table_args__ = (
+        CheckConstraint(
+            "(embedding IS NULL AND embedding_model IS NULL AND embedding_version IS NULL AND embedding_updated_at IS NULL) "
+            "OR (embedding IS NOT NULL AND embedding_model IS NOT NULL AND embedding_version IS NOT NULL AND embedding_updated_at IS NOT NULL)",
+            name="ck_chunks_embedding_metadata_complete",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
     page_id: Mapped[str] = mapped_column(ForeignKey("pages.id", ondelete="CASCADE"), index=True)
@@ -49,5 +57,9 @@ class Chunk(Base):
     heading_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     source_location: Mapped[str | None] = mapped_column(String(240), nullable=True)
     position: Mapped[int] = mapped_column(Integer, default=0)
-    embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    legacy_embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
+    embedding: Mapped[list[float] | None] = mapped_column(EmbeddingVector, nullable=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    embedding_version: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    embedding_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     page: Mapped[Page] = relationship(back_populates="chunks")

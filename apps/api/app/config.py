@@ -17,6 +17,12 @@ class Settings(BaseSettings):
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     ollama_base_url: str = "http://host.docker.internal:11434"
+    embedding_provider: str = "legacy"
+    embedding_model: str = "embeddinggemma:300m-qat-q4_0"
+    embedding_base_url: str = "http://host.docker.internal:11434"
+    embedding_dimensions: int = Field(default=768, ge=1, le=2000)
+    embedding_batch_size: int = Field(default=32, ge=1, le=256)
+    embedding_timeout_seconds: float = Field(default=60, ge=1, le=600)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

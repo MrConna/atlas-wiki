@@ -27,7 +27,10 @@ def main() -> None:
         os.environ["MODEL_PROVIDER"] = "none"
 
         from fastapi.testclient import TestClient
+        from app.database import Base, engine
         from app.main import app
+
+        Base.metadata.create_all(engine)
 
         rows = []
         with TestClient(app) as client:

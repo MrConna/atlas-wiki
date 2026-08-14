@@ -52,6 +52,19 @@ Retrieved evidence is treated as untrusted text. The model must cite evidence wi
 
 The default local embedding is deterministic and credential-free. It is designed for the MVP scale; see `docs/ARCHITECTURE.md` for the native pgvector migration boundary.
 
+## Native local embeddings
+
+Atlas supports a private multilingual embedding path using Ollama, EmbeddingGemma, and PostgreSQL pgvector. DeepSeek remains the answer-generation model; document and query embeddings stay on the local Ollama service.
+
+Start the optional bundled Ollama service and pull the pinned model tag:
+
+```bash
+docker compose -f compose.yaml -f compose.ollama.yaml up -d --build
+docker compose exec api python -m app.cli embeddings-backfill
+```
+
+Backfill is resumable and model-aware. It preserves the old feature-hash vectors for rollback and commits each validated batch atomically. The optional model volume is persistent and Ollama is not exposed on a host port.
+
 ## Development
 
 API:
