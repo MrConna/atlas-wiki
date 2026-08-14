@@ -100,7 +100,7 @@ async def _post_with_retries(url: str, headers: dict, payload: dict) -> httpx.Re
                 for attempt in range(attempts):
                     try:
                         response = await client.post(url, headers=headers, json=payload)
-                    except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
+                    except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as exc:
                         if attempt == attempts - 1:
                             raise ModelUnavailableError("Model provider is unavailable") from exc
                         delay = settings.model_retry_base_seconds * (2**attempt)
@@ -116,6 +116,17 @@ async def _post_with_retries(url: str, headers: dict, payload: dict) -> httpx.Re
                             delay = settings.model_retry_base_seconds * (2**attempt)
                         await asyncio.sleep(delay)
                         continue
+                    if response.is_success and url.rstrip("/").endswith("/chat/completions"):
+                        try:
+                            finish_reason = response.json()["choices"][0]["finish_reason"]
+                        except (ValueError, KeyError, IndexError, TypeError):
+                            finish_reason = None
+                        if finish_reason == "insufficient_system_resource":
+                            if attempt == attempts - 1:
+                                raise ModelUnavailableError("Model provider is unavailable")
+                            delay = settings.model_retry_base_seconds * (2**attempt)
+                            await asyncio.sleep(delay)
+                            continue
                     try:
                         response.raise_for_status()
                     except httpx.HTTPStatusError as exc:

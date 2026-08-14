@@ -7,7 +7,7 @@ import sys
 import time
 
 from app.config import settings
-from app.providers import generate_answer
+from app.providers import ModelProviderError, generate_answer
 
 
 async def main() -> int:
@@ -22,10 +22,15 @@ async def main() -> int:
         return 2
 
     started = time.monotonic()
-    answer = await generate_answer(
-        "What color is the Atlas smoke fact?",
-        ["The Atlas smoke fact is cobalt."],
-    )
+    try:
+        answer = await generate_answer(
+            "What color is the Atlas smoke fact?",
+            ["The Atlas smoke fact is cobalt."],
+        )
+    except ModelProviderError as exc:
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        print(f"FAIL: {exc.code} ({elapsed_ms} ms)", file=sys.stderr)
+        return 1
     elapsed_ms = round((time.monotonic() - started) * 1000)
     if not answer or "[1]" not in answer:
         print(f"FAIL: response did not satisfy the citation contract ({elapsed_ms} ms)", file=sys.stderr)

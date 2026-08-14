@@ -94,7 +94,18 @@ def test_transient_status_honors_retry_after_and_then_succeeds(monkeypatch):
     assert sleeps == [2.0, 0]
 
 
-@pytest.mark.parametrize("exc", [httpx.ConnectError("secret"), httpx.ReadTimeout("secret")])
+@pytest.mark.parametrize(
+    "exc",
+    [
+        httpx.ConnectError("secret"),
+        httpx.ReadTimeout("secret"),
+        httpx.WriteTimeout("secret"),
+        httpx.PoolTimeout("secret"),
+        httpx.ReadError("secret"),
+        httpx.WriteError("secret"),
+        httpx.RemoteProtocolError("secret"),
+    ],
+)
 def test_network_failure_retries_and_is_sanitized(monkeypatch, exc):
     install_client(monkeypatch, [exc, exc, exc])
     with pytest.raises(providers.ModelUnavailableError) as caught:
@@ -147,7 +158,7 @@ def test_incomplete_or_tool_responses_are_never_returned(monkeypatch, finish_rea
 
 
 def test_insufficient_system_resource_is_retryable(monkeypatch):
-    install_client(
+    captured = install_client(
         monkeypatch,
         [
             response(
@@ -160,11 +171,19 @@ def test_insufficient_system_resource_is_retryable(monkeypatch):
                         }
                     ]
                 },
-            )
+            ),
+            response(
+                200,
+                {
+                    "choices": [
+                        {"finish_reason": "stop", "message": {"content": "Recovered [1]"}}
+                    ]
+                },
+            ),
         ],
     )
-    with pytest.raises(providers.ModelUnavailableError):
-        asyncio.run(providers.generate_answer("Question?", ["Evidence."]))
+    assert asyncio.run(providers.generate_answer("Question?", ["Evidence."])) == "Recovered [1]"
+    assert len(captured["requests"]) == 2
 
 
 def test_prompt_limit_rejects_before_network(monkeypatch):
