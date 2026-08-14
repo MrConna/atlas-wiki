@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=768, ge=1, le=2000)
     embedding_batch_size: int = Field(default=32, ge=1, le=256)
     embedding_timeout_seconds: float = Field(default=60, ge=1, le=600)
+    embedding_max_concurrency: int = Field(default=4, ge=1, le=64)
+    embedding_queue_timeout_seconds: float = Field(default=2, ge=0.1, le=60)
     semantic_min_score: float = Field(default=0.40, ge=0, le=1)
     semantic_expansion_min_score: float = Field(default=0.38, ge=0, le=1)
     hybrid_min_score: float = Field(default=0.423, ge=0, le=1)

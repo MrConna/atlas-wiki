@@ -1,4 +1,5 @@
 import math
+import threading
 import time
 from dataclasses import dataclass
 
@@ -47,9 +48,31 @@ class OllamaEmbeddingProvider:
             )
         self.base_url = settings.embedding_base_url.rstrip("/")
         self.model = settings.embedding_model
-        self.client = httpx.Client(timeout=settings.embedding_timeout_seconds, transport=transport)
+        concurrency = settings.embedding_max_concurrency
+        self.client = httpx.Client(
+            timeout=settings.embedding_timeout_seconds,
+            limits=httpx.Limits(
+                max_connections=concurrency,
+                max_keepalive_connections=concurrency,
+            ),
+            transport=transport,
+        )
+        self._capacity = threading.BoundedSemaphore(concurrency)
+        self._closed = False
+        self._close_lock = threading.Lock()
 
     def _request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        if self._closed:
+            raise EmbeddingError("Embedding provider is closed")
+        acquired = self._capacity.acquire(timeout=settings.embedding_queue_timeout_seconds)
+        if not acquired:
+            raise EmbeddingError("Embedding provider is busy")
+        try:
+            return self._request_with_retries(method, path, **kwargs)
+        finally:
+            self._capacity.release()
+
+    def _request_with_retries(self, method: str, path: str, **kwargs) -> httpx.Response:
         retry_statuses = {429, 502, 503, 504}
         attempts = 3
         for attempt in range(attempts):
@@ -67,7 +90,10 @@ class OllamaEmbeddingProvider:
         raise EmbeddingError("Embedding provider unavailable")
 
     def close(self) -> None:
-        self.client.close()
+        with self._close_lock:
+            if not self._closed:
+                self._closed = True
+                self.client.close()
 
     def resolve_identity(self) -> EmbeddingIdentity:
         response = self._request("GET", "/api/tags")
@@ -124,9 +150,30 @@ class OllamaEmbeddingProvider:
         return output
 
 
-def get_embedding_provider() -> OllamaEmbeddingProvider | None:
+_provider: OllamaEmbeddingProvider | None = None
+_provider_lock = threading.Lock()
+
+
+def initialize_embedding_provider() -> OllamaEmbeddingProvider | None:
+    global _provider
     if settings.embedding_provider == "legacy":
         return None
     if settings.embedding_provider != "ollama":
         raise EmbeddingError(f"Unsupported embedding provider: {settings.embedding_provider}")
-    return OllamaEmbeddingProvider()
+    with _provider_lock:
+        if _provider is None or _provider._closed:
+            _provider = OllamaEmbeddingProvider()
+        return _provider
+
+
+def get_embedding_provider() -> OllamaEmbeddingProvider | None:
+    return initialize_embedding_provider()
+
+
+def close_embedding_provider() -> None:
+    global _provider
+    with _provider_lock:
+        provider = _provider
+        _provider = None
+    if provider is not None:
+        provider.close()

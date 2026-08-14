@@ -1,7 +1,10 @@
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from pathlib import Path
+
+from sqlalchemy import select, text
 
 from app.database import Base, SessionLocal, engine
+from app.embeddings import EmbeddingError
 from app.main import app
 from app.models import Chunk
 
@@ -16,6 +19,71 @@ def setup_function():
 
 def test_health():
     assert client.get("/api/v1/health").json() == {"status": "ok"}
+
+
+def prepare_readiness_database(monkeypatch, tmp_path: Path):
+    with engine.begin() as connection:
+        connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
+        connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(128) NOT NULL)"))
+        connection.execute(text("INSERT INTO alembic_version VALUES ('0002_pgvector_embeddings')"))
+    monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
+    monkeypatch.setattr("app.main.settings.embedding_provider", "legacy")
+    monkeypatch.setattr("app.main.settings.model_provider", "none")
+    monkeypatch.setattr("app.main.generation_failure_code", None)
+
+
+def test_readiness_reports_ready_without_optional_generation(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ready"
+    assert response.json()["checks"]["generation"]["status"] == "disabled"
+
+
+def test_readiness_generation_misconfiguration_is_degraded(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.model_provider", "deepseek")
+    monkeypatch.setattr("app.main.settings.model_name", "deepseek-v4-flash")
+    monkeypatch.setattr("app.main.settings.deepseek_api_key", "")
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["checks"]["generation"]["reason"] == "missing_api_key"
+
+
+def test_readiness_remembers_generation_failure_as_degraded(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.model_provider", "deepseek")
+    monkeypatch.setattr("app.main.settings.model_name", "deepseek-v4-flash")
+    monkeypatch.setattr("app.main.settings.deepseek_api_key", "configured-secret")
+    monkeypatch.setattr("app.main.generation_failure_code", "provider_unavailable")
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["checks"]["generation"]["reason"] == "provider_unavailable"
+
+
+def test_readiness_native_provider_failure_is_not_ready(monkeypatch, tmp_path):
+    prepare_readiness_database(monkeypatch, tmp_path)
+    monkeypatch.setattr("app.main.settings.embedding_provider", "ollama")
+
+    class FailingProvider:
+        def resolve_identity(self):
+            raise EmbeddingError("private upstream failure")
+
+    monkeypatch.setattr("app.main.get_embedding_provider", lambda: FailingProvider())
+    response = client.get("/api/v1/ready")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "not_ready"
+    assert response.json()["checks"]["retrieval"] == {
+        "status": "not_ready",
+        "reason": "embedding_provider_unavailable",
+    }
+    assert "private upstream failure" not in response.text
 
 
 def test_page_search_and_delete_flow():
