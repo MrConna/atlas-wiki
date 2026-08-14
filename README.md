@@ -46,6 +46,25 @@ MODEL_PROVIDER=deepseek
 MODEL_NAME=deepseek-v4-flash
 DEEPSEEK_API_KEY=your-key
 DEEPSEEK_BASE_URL=https://api.deepseek.com
+MODEL_CONNECT_TIMEOUT_SECONDS=5
+MODEL_READ_TIMEOUT_SECONDS=120
+MODEL_TOTAL_TIMEOUT_SECONDS=150
+MODEL_MAX_RETRIES=2
+MODEL_MAX_CONCURRENCY=4
+MODEL_MAX_TOKENS=2048
+```
+
+Transient connection, timeout, rate-limit, and server failures are retried with
+bounded backoff. Atlas returns a sanitized `503` when the provider remains
+unavailable and a sanitized `502` for malformed responses; prompts, evidence,
+API keys, and provider response bodies are never included in API errors.
+
+An opt-in smoke test makes one small billable request and prints no prompt,
+evidence, answer, headers, or credential:
+
+```bash
+RUN_DEEPSEEK_SMOKE=1 docker compose exec -e RUN_DEEPSEEK_SMOKE=1 api \
+  python scripts/smoke_deepseek.py
 ```
 
 Retrieved evidence is treated as untrusted text. The model must cite evidence with valid `[n]` markers; Atlas rejects generated answers that omit or invent citation identifiers.

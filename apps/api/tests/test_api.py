@@ -79,6 +79,31 @@ def test_ask_reports_insufficient_evidence():
     }
 
 
+def test_ask_returns_sanitized_provider_unavailable_error(monkeypatch):
+    from app.providers import ModelUnavailableError
+
+    created = client.post(
+        "/api/v1/pages",
+        json={"title": "Provider failure", "content": "Traceable provider evidence."},
+    )
+    assert created.status_code == 201
+
+    async def unavailable(_question, _evidence):
+        raise ModelUnavailableError("Model provider is unavailable")
+
+    monkeypatch.setattr("app.main.generate_answer", unavailable)
+    answer = client.post("/api/v1/ask", json={"question": "provider evidence"})
+
+    assert answer.status_code == 503
+    assert answer.json() == {
+        "detail": {
+            "code": "provider_unavailable",
+            "message": "Model provider is unavailable",
+            "retryable": True,
+        }
+    }
+
+
 def test_generated_answer_gets_a_citation_marker(monkeypatch):
     long_evidence = "Citations make claims traceable. " + "context " * 80
     client.post("/api/v1/pages", json={"title": "Grounding", "content": long_evidence})
