@@ -17,16 +17,14 @@
 - Deleting a page cascades to chunks/document metadata and removes the stored original.
 - Imported source pages are immutable, preserving the relationship between extracted text, hash, and original file.
 
-## Deliberate MVP choices
+## Retrieval compatibility
 
-- Embeddings are deterministic local feature-hash vectors, so retrieval works with no credentials or model download.
-- Retrieval scans chunk vectors in the application. This is acceptable for the 1,000-document MVP target; a later migration can map embeddings to native pgvector indexes without changing API contracts.
-- Schema creation uses SQLAlchemy metadata for clean installations. Production upgrades should introduce Alembic migrations before schema evolution.
+`EMBEDDING_PROVIDER=legacy` retains the deterministic 128-dimensional feature-hash path for rollback and offline development. `EMBEDDING_PROVIDER=ollama` is the production path: new or edited chunks are embedded before their transaction commits, semantic candidates are ordered in PostgreSQL by exact pgvector cosine distance, and hybrid retrieval adds only a bounded lexical reranking bonus. Provider failure leaves the prior page or import transaction unchanged.
 
 ## Native embedding migration
 
 Alembic now owns production schema changes. The expand migration preserves the 128-dimensional feature hash in `legacy_embedding` and adds a nullable native `vector(768)` column plus per-chunk model identity and prompt-schema metadata. Existing and new installations both run `alembic upgrade head` before the API starts.
 
-The local embedding provider uses Ollama with EmbeddingGemma retrieval prompts. Query and document vectors are generated in distinct prompt formats, validated for count, dimension, finite values, and nonzero norm, then normalized before persistence. A resumable backfill uses a PostgreSQL advisory lock and commits deterministic batches. Native pgvector reads are enabled only after every current chunk has a vector for the same resolved Ollama model digest and prompt schema.
+The local embedding provider uses Ollama with EmbeddingGemma retrieval prompts. Query and document vectors are generated in distinct prompt formats, validated for count, dimension, finite values, and nonzero norm, then normalized before persistence. A resumable backfill uses a PostgreSQL advisory lock and commits deterministic batches. Native reads filter every chunk by the resolved Ollama model digest and prompt schema, so stale or mixed vector spaces cannot enter semantic results.
 
 The first pgvector release uses exact cosine nearest-neighbor search. HNSW is intentionally deferred until after backfill and retrieval evaluation because maintaining an approximate index during bulk writes adds cost and another recall variable.

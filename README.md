@@ -5,7 +5,7 @@ A local-first personal LLM wiki with traceable citations.
 ## Current foundation
 
 - FastAPI service with health, page, search, and ask endpoints
-- PostgreSQL + pgvector-ready schema
+- PostgreSQL + native pgvector multilingual retrieval
 - Next.js dashboard
 - Docker Compose local environment
 - Product requirements and API contract
@@ -50,7 +50,7 @@ DEEPSEEK_BASE_URL=https://api.deepseek.com
 
 Retrieved evidence is treated as untrusted text. The model must cite evidence with valid `[n]` markers; Atlas rejects generated answers that omit or invent citation identifiers.
 
-The default local embedding is deterministic and credential-free. It is designed for the MVP scale; see `docs/ARCHITECTURE.md` for the native pgvector migration boundary.
+The default `legacy` embedding mode remains deterministic and credential-free for rollback. The recommended production mode below uses local multilingual embeddings and calibrated no-answer thresholds.
 
 ## Native local embeddings
 
@@ -74,6 +74,7 @@ cd apps/api
 python -m venv .venv
 . .venv/bin/activate
 pip install -e '.[dev]'
+alembic upgrade head
 pytest
 uvicorn app.main:app --reload
 ```

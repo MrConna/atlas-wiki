@@ -116,6 +116,13 @@ class OllamaEmbeddingProvider:
     def embed_query(self, query: str) -> list[float]:
         return self._embed([f"task: search result | query: {query}"])[0]
 
+    def embed_queries(self, queries: list[str]) -> list[list[float]]:
+        prompts = [f"task: search result | query: {query}" for query in queries]
+        output = []
+        for start in range(0, len(prompts), settings.embedding_batch_size):
+            output.extend(self._embed(prompts[start : start + settings.embedding_batch_size]))
+        return output
+
 
 def get_embedding_provider() -> OllamaEmbeddingProvider | None:
     if settings.embedding_provider == "legacy":

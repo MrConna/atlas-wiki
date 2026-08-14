@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     embedding_dimensions: int = Field(default=768, ge=1, le=2000)
     embedding_batch_size: int = Field(default=32, ge=1, le=256)
     embedding_timeout_seconds: float = Field(default=60, ge=1, le=600)
+    semantic_min_score: float = Field(default=0.423, ge=0, le=1)
+    semantic_expansion_min_score: float = Field(default=0.38, ge=0, le=1)
+    hybrid_min_score: float = Field(default=0.423, ge=0, le=1)
+    retrieval_candidate_limit: int = Field(default=100, ge=10, le=1000)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

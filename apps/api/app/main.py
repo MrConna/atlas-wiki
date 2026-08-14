@@ -6,6 +6,7 @@ import tempfile
 import threading
 import unicodedata
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Response, UploadFile, status
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from .config import settings
 from .database import SessionLocal, get_db
+from .embeddings import PROMPT_SCHEMA_VERSION, EmbeddingError, get_embedding_provider
 from .models import Chunk, Document, Page
 from .providers import generate_answer
 from .retrieval import chunk_text, cosine_similarity, embed_text, keyword_score
@@ -68,6 +70,24 @@ def rebuild_chunks(page: Page) -> None:
                 legacy_embedding=embed_text(chunk_content),
             )
         )
+
+
+def populate_native_embeddings(page: Page) -> None:
+    provider = get_embedding_provider()
+    if provider is None or not page.chunks:
+        return
+    try:
+        identity = provider.resolve_identity().value
+        vectors = provider.embed_documents([(page.title, chunk.content) for chunk in page.chunks])
+    except EmbeddingError as exc:
+        raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
+    finally:
+        provider.close()
+    for chunk, vector in zip(page.chunks, vectors, strict=True):
+        chunk.embedding = vector
+        chunk.embedding_model = identity
+        chunk.embedding_version = PROMPT_SCHEMA_VERSION
+        chunk.embedding_updated_at = datetime.now(timezone.utc)
 
 
 @asynccontextmanager
@@ -185,6 +205,11 @@ async def import_document(file: UploadFile = File(...), db: Session = Depends(ge
     upload_dir.mkdir(parents=True, exist_ok=True)
     suffix = Path(filename).suffix.lower()
     stored_path = upload_dir / f"{digest}{suffix}"
+    page = Page(title=title, slug=unique_slug(db, title), content=content, source_type="import")
+    rebuild_chunks(page)
+    # Inference happens before the file/DB critical section. A concurrent
+    # duplicate may waste one call, but cannot hold storage mutations hostage.
+    populate_native_embeddings(page)
     with storage_lock:
         existing = db.scalar(select(Document).where(Document.content_hash == digest))
         if existing:
@@ -192,12 +217,11 @@ async def import_document(file: UploadFile = File(...), db: Session = Depends(ge
         used_storage = sum(path.stat().st_size for path in upload_dir.iterdir() if path.is_file() and not path.name.startswith(".atlas-"))
         if used_storage + len(data) > settings.max_storage_bytes:
             raise HTTPException(status_code=507, detail="The local document storage quota would be exceeded")
+        page.slug = unique_slug(db, title)
         descriptor, staged_name = tempfile.mkstemp(prefix=".atlas-", dir=upload_dir)
         staged_path = Path(staged_name)
         with os.fdopen(descriptor, "wb") as staged_file:
             staged_file.write(data)
-        page = Page(title=title, slug=unique_slug(db, title), content=content, source_type="import")
-        rebuild_chunks(page)
         document = Document(
             page=page,
             filename=filename,
@@ -230,6 +254,7 @@ async def import_document(file: UploadFile = File(...), db: Session = Depends(ge
 def create_page(payload: PageCreate, db: Session = Depends(get_db)):
     page = Page(title=payload.title.strip(), slug=unique_slug(db, payload.title), content=payload.content)
     rebuild_chunks(page)
+    populate_native_embeddings(page)
     db.add(page)
     db.commit()
     db.refresh(page)
@@ -250,7 +275,9 @@ def get_page(page_id: str, db: Session = Depends(get_db)):
 
 @app.patch("/api/v1/pages/{page_id}", response_model=PageRead)
 def update_page(page_id: str, payload: PageUpdate, db: Session = Depends(get_db)):
-    page = require_page(db, page_id)
+    page = db.scalar(select(Page).where(Page.id == page_id).with_for_update())
+    if page is None:
+        raise HTTPException(status_code=404, detail="Page not found")
     if page.source_type == "import":
         raise HTTPException(status_code=409, detail="Imported source pages are immutable; replace the document instead")
     if payload.title is not None:
@@ -259,6 +286,7 @@ def update_page(page_id: str, payload: PageUpdate, db: Session = Depends(get_db)
     if payload.content is not None:
         page.content = payload.content
     rebuild_chunks(page)
+    populate_native_embeddings(page)
     db.commit()
     db.refresh(page)
     return page
@@ -291,6 +319,12 @@ def delete_page(page_id: str, db: Session = Depends(get_db)):
 
 
 def search_chunks(db: Session, query: str, limit: int, mode: str = "hybrid") -> list[tuple[Chunk, Page, float]]:
+    if mode != "keyword" and settings.embedding_provider == "ollama":
+        return search_native_chunks(db, query, limit, mode)
+    return search_legacy_chunks(db, query, limit, mode)
+
+
+def search_legacy_chunks(db: Session, query: str, limit: int, mode: str) -> list[tuple[Chunk, Page, float]]:
     query_embedding = embed_text(query)
     candidates = db.execute(select(Chunk, Page).join(Page, Chunk.page_id == Page.id)).all()
     scored: list[tuple[Chunk, Page, float]] = []
@@ -301,7 +335,108 @@ def search_chunks(db: Session, query: str, limit: int, mode: str = "hybrid") -> 
         score = keyword if mode == "keyword" else semantic if mode == "semantic" else 0.55 * keyword + 0.45 * semantic
         if score >= 0.12:
             scored.append((chunk, page, score))
-    return sorted(scored, key=lambda item: item[2], reverse=True)[:limit]
+    return sorted(scored, key=lambda item: (-item[2], item[0].id))[:limit]
+
+
+def search_native_chunks(db: Session, query: str, limit: int, mode: str) -> list[tuple[Chunk, Page, float]]:
+    provider = get_embedding_provider()
+    if provider is None:
+        return search_legacy_chunks(db, query, limit, mode)
+    try:
+        identity = provider.resolve_identity().value
+        query_parts = [query]
+        for part in re.split(r"\b(?:and|also)\b|和|以及|同时|[;；:：]", query, flags=re.IGNORECASE):
+            normalized = part.strip(" ，,。.？?")
+            if len(normalized) >= 4 and normalized not in query_parts:
+                query_parts.append(normalized)
+        query_embeddings = provider.embed_queries(query_parts)
+    except EmbeddingError as exc:
+        raise HTTPException(status_code=503, detail=f"Embedding provider unavailable: {exc}") from None
+    finally:
+        provider.close()
+
+    candidate_limit = max(limit * 5, settings.retrieval_candidate_limit)
+    eligible = (
+        Chunk.embedding.is_not(None),
+        Chunk.embedding_model == identity,
+        Chunk.embedding_version == PROMPT_SCHEMA_VERSION,
+    )
+    if db.bind and db.bind.dialect.name == "postgresql":
+        semantic_scores = {}
+        rows_by_id = {}
+        for query_embedding in query_embeddings:
+            distance = Chunk.embedding.cosine_distance(query_embedding)
+            rows = db.execute(
+                select(Chunk, Page, distance.label("distance"))
+                .join(Page, Chunk.page_id == Page.id)
+                .where(*eligible)
+                .order_by(distance, Chunk.id)
+                .limit(candidate_limit)
+            ).all()
+            for chunk, page, distance_value in rows:
+                rows_by_id[chunk.id] = (chunk, page)
+                score = max(0.0, min(1.0, 1.0 - float(distance_value)))
+                semantic_scores[chunk.id] = max(semantic_scores.get(chunk.id, 0.0), score)
+        native_rows = list(rows_by_id.values())
+    else:
+        native_rows = db.execute(
+            select(Chunk, Page).join(Page, Chunk.page_id == Page.id).where(*eligible)
+        ).all()
+        semantic_scores = {
+            chunk.id: max(
+                max(0.0, min(1.0, cosine_similarity(query_embedding, chunk.embedding or [])))
+                for query_embedding in query_embeddings
+            )
+            for chunk, _page in native_rows
+        }
+
+    control_language = bool(
+        re.search(
+            r"ignore\b.*instructions|reveal\s+secrets|do\s+not\s+cite|忽略.*指令|输出密钥|不要引用",
+            query,
+            flags=re.IGNORECASE,
+        )
+    )
+    best_semantic = max(semantic_scores.values(), default=0.0)
+    primary_confident = best_semantic >= settings.semantic_min_score or (
+        control_language
+        and len(query_embeddings) > 1
+        and best_semantic >= settings.semantic_expansion_min_score
+    )
+
+    def accepted(chunk_id: str) -> bool:
+        return semantic_scores.get(chunk_id, 0.0) >= settings.semantic_min_score or (
+            primary_confident
+            and len(query_embeddings) > 1
+            and semantic_scores.get(chunk_id, 0.0) >= settings.semantic_expansion_min_score
+        )
+
+    if mode == "semantic":
+        scored = [
+            (chunk, page, semantic_scores[chunk.id])
+            for chunk, page in native_rows
+            if accepted(chunk.id)
+        ]
+        return sorted(scored, key=lambda item: (-item[2], item[0].id))[:limit]
+
+    by_id = {chunk.id: (chunk, page) for chunk, page in native_rows}
+    keyword_scores = {}
+    for chunk, page in native_rows:
+        keyword = keyword_score(query, f"{page.title}\n{chunk.content}")
+        if keyword > 0:
+            keyword_scores[chunk.id] = keyword
+    scored = []
+    for chunk_id, (chunk, page) in by_id.items():
+        # Semantic similarity is the confidence gate; lexical overlap is only
+        # a bounded reranking bonus and cannot rescue an unrelated low-similarity hit.
+        semantic = semantic_scores.get(chunk_id, 0.0)
+        score = min(1.0, semantic + 0.12 * keyword_scores.get(chunk_id, 0.0))
+        if accepted(chunk_id) and (
+            score >= settings.hybrid_min_score
+            or semantic_scores.get(chunk_id, 0.0) >= settings.semantic_expansion_min_score
+        ):
+            scored.append((chunk, page, score))
+    return sorted(scored, key=lambda item: (-item[2], item[0].id))[:limit]
 
 
 @app.get("/api/v1/search", response_model=list[SearchResult])

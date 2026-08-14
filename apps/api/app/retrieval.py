@@ -4,6 +4,11 @@ from collections import defaultdict
 
 
 EMBEDDING_DIMENSIONS = 128
+KEYWORD_STOPWORDS = {
+    "a", "an", "and", "are", "be", "do", "for", "how", "i", "in", "is",
+    "it", "of", "on", "should", "the", "to", "what", "when", "where",
+    "which", "will", "with",
+}
 
 
 def tokenize(text: str) -> list[str]:
@@ -32,7 +37,7 @@ def cosine_similarity(left: list[float], right: list[float]) -> float:
 
 
 def keyword_score(query: str, text: str) -> float:
-    terms = tokenize(query)
+    terms = [term for term in tokenize(query) if term not in KEYWORD_STOPWORDS]
     if not terms:
         return 0.0
     frequencies: dict[str, int] = defaultdict(int)
