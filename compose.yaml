@@ -45,6 +45,8 @@ services:
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-768}
       EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
       EMBEDDING_TIMEOUT_SECONDS: ${EMBEDDING_TIMEOUT_SECONDS:-60}
+      EMBEDDING_MAX_CONCURRENCY: ${EMBEDDING_MAX_CONCURRENCY:-4}
+      EMBEDDING_QUEUE_TIMEOUT_SECONDS: ${EMBEDDING_QUEUE_TIMEOUT_SECONDS:-2}
       SEMANTIC_MIN_SCORE: ${SEMANTIC_MIN_SCORE:-0.40}
       SEMANTIC_EXPANSION_MIN_SCORE: ${SEMANTIC_EXPANSION_MIN_SCORE:-0.38}
       HYBRID_MIN_SCORE: ${HYBRID_MIN_SCORE:-0.423}
@@ -56,6 +58,12 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
     ports:
       - "127.0.0.1:${API_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/v1/ready', timeout=5)"]
+      interval: 10s
+      timeout: 6s
+      retries: 12
+      start_period: 20s
     depends_on:
       db:
         condition: service_healthy
