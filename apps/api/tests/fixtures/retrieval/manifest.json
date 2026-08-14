@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "retrieved_at": "2026-08-13",
+  "note": "Evaluation corpus is an original summary of the linked official OpenAI documentation, not a verbatim copy.",
+  "documents": [
+    {
+      "doc_key": "codex-prompting",
+      "file": "corpus/codex-prompting.md",
+      "source_url": "https://developers.openai.com/codex/prompting"
+    },
+    {
+      "doc_key": "codex-agents-md",
+      "file": "corpus/codex-agents-md.md",
+      "source_url": "https://developers.openai.com/codex/agent-configuration/agents-md"
+    }
+  ]
+}
