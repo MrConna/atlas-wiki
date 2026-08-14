@@ -119,7 +119,7 @@ def test_uncited_claim_without_space_after_terminator_is_rejected(monkeypatch):
     client.post("/api/v1/pages", json={"title": "Facts", "content": "A supported fact."})
 
     async def fake_generate(_question, _evidence):
-        return "Supported fact [1].Fabricated uncited claim。另一个无引用事实"
+        return "Supported fact [1].Fabricated claim!Encryption fails。伪造事实"
 
     monkeypatch.setattr("app.main.generate_answer", fake_generate)
     answer = client.post("/api/v1/ask", json={"question": "supported fact"}).json()

@@ -367,7 +367,8 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
             line,
         )
         for sentence in re.findall(r"[^.!?。！？]+(?:[.!?。！？](?:\s*\[\d+\])*)?", protected_line):
-            if len(re.findall(r"[\w\u4e00-\u9fff]+", sentence)) >= 3:
+            content_without_citations = re.sub(r"\[\d+\]", "", sentence)
+            if re.search(r"[\w\u4e00-\u9fff]", content_without_citations):
                 factual_sentences.append(sentence.strip())
     every_sentence_cited = factual_sentences and all(re.search(r"\[\d+\]", sentence) for sentence in factual_sentences)
     if not markers or any(marker < 1 or marker > len(citations) for marker in markers) or not every_sentence_cited:
