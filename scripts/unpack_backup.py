@@ -2,6 +2,7 @@
 """Safely unpack the fixed Atlas backup bundle layout."""
 
 import json
+import os
 import shutil
 import sys
 import tarfile
@@ -9,6 +10,7 @@ from pathlib import Path
 
 
 EXPECTED = {"manifest.json", "SHA256SUMS", "database.dump", "uploads.tar"}
+MAX_BUNDLE_BYTES = int(os.getenv("ATLAS_RESTORE_MAX_BUNDLE_BYTES", str(200 * 1024**3)))
 
 
 def main() -> int:
@@ -23,6 +25,10 @@ def main() -> int:
             raise ValueError("backup bundle has unexpected or duplicate members")
         if any(not member.isfile() for member in members):
             raise ValueError("backup bundle members must be regular files")
+        if any(member.size < 0 or member.size > MAX_BUNDLE_BYTES for member in members):
+            raise ValueError("backup bundle member exceeds the configured size limit")
+        if sum(member.size for member in members) > MAX_BUNDLE_BYTES:
+            raise ValueError("backup bundle exceeds the configured size limit")
         manifest_source = bundle.extractfile(bundle.getmember("manifest.json"))
         if manifest_source is None:
             raise ValueError("cannot read backup manifest")

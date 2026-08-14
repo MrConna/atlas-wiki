@@ -18,12 +18,19 @@ fi
 tmp_dir=$(mktemp -d "${TMPDIR:-/tmp}/atlas-restore.XXXXXX")
 running_services=$(docker compose ps --status running --services 2>/dev/null || true)
 restart_services=()
+mutation_started=false
+restore_succeeded=false
+uploads_stage=$(mktemp -d "$PWD/.atlas-uploads-restore.XXXXXX")
 cleanup() {
   status=$?
-  if [[ ${#restart_services[@]} -gt 0 ]]; then
+  if [[ ${#restart_services[@]} -gt 0 && ( "$mutation_started" == false || "$restore_succeeded" == true ) ]]; then
     docker compose start "${restart_services[@]}" >/dev/null || true
   fi
   rm -rf -- "$tmp_dir"
+  rm -rf -- "$uploads_stage"
+  if [[ "$status" != 0 && "$mutation_started" == true ]]; then
+    echo "Restore failed after mutation began; application services remain stopped" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT INT TERM
@@ -36,6 +43,9 @@ for required in manifest.json SHA256SUMS database.dump uploads.tar; do
   fi
 done
 (cd "$tmp_dir" && sha256sum -c SHA256SUMS)
+docker compose run --rm --no-deps --entrypoint python \
+  -v "$tmp_dir:/backup:ro" api scripts/check_backup_revision.py /backup/manifest.json
+python3 scripts/unpack_uploads.py "$tmp_dir/uploads.tar" "$uploads_stage"
 
 for service in api web; do
   grep -qx "$service" <<<"$running_services" && restart_services+=("$service")
@@ -56,16 +66,14 @@ if [[ "$database_ready" != true ]]; then
   echo "Database did not become ready for restore" >&2
   exit 3
 fi
-has_pages=$(docker compose exec -T db psql -U atlas -d atlas -Atqc \
-  "SELECT CASE WHEN to_regclass('public.pages') IS NULL THEN 'no' ELSE 'yes' END")
-if [[ "$has_pages" == yes ]]; then
-  page_count=$(docker compose exec -T db psql -U atlas -d atlas -Atqc "SELECT count(*) FROM pages")
-  if [[ "$page_count" != 0 ]]; then
-    echo "Restore requires an empty database; refusing to overwrite $page_count page(s)" >&2
-    exit 2
-  fi
+public_objects=$(docker compose exec -T db psql -U atlas -d atlas -Atqc \
+  "SELECT (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public') + (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public') + (SELECT count(*) FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace WHERE n.nspname='public')")
+if [[ "$public_objects" != 0 ]]; then
+  echo "Restore requires a database with an empty public schema; refusing to drop $public_objects object(s)" >&2
+  exit 2
 fi
 
+mutation_started=true
 docker compose exec -T db psql -U atlas -d postgres -v ON_ERROR_STOP=1 <<'SQL'
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = 'atlas' AND pid <> pg_backend_pid();
 DROP DATABASE IF EXISTS atlas;
@@ -74,6 +82,10 @@ SQL
 docker compose exec -T db pg_restore -U atlas -d atlas --single-transaction \
   --no-owner --no-acl --exit-on-error \
   <"$tmp_dir/database.dump"
-python3 scripts/unpack_uploads.py "$tmp_dir/uploads.tar" uploads
+docker compose run --rm --no-deps --entrypoint alembic api upgrade head
+mv uploads "$tmp_dir/original-uploads"
+mv "$uploads_stage" uploads
+uploads_stage="$tmp_dir/published-uploads"
 docker compose run --rm --no-deps --entrypoint python api scripts/verify_storage.py
+restore_succeeded=true
 echo "Restore completed. Start the API and run: docker compose exec api python scripts/verify_storage.py"

@@ -41,12 +41,16 @@ class BackupToolTests(unittest.TestCase):
             destination = root / "out"
             destination.mkdir()
             with tarfile.open(archive, "w:") as bundle:
+                valid = tarfile.TarInfo("first.txt")
+                valid.size = 1
+                bundle.addfile(valid, io.BytesIO(b"x"))
                 info = tarfile.TarInfo("../escape.txt")
                 info.size = 1
                 bundle.addfile(info, io.BytesIO(b"x"))
             result = self.run_tool("unpack_uploads.py", archive, destination)
             self.assertNotEqual(result.returncode, 0)
             self.assertFalse((root / "escape.txt").exists())
+            self.assertFalse((destination / "first.txt").exists())
 
     def test_uploads_extract_regular_flat_files(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -65,4 +69,3 @@ class BackupToolTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
