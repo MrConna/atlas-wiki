@@ -16,8 +16,12 @@ def upgrade() -> None:
     if is_postgres:
         op.execute("CREATE EXTENSION IF NOT EXISTS vector")
     vector_type = Vector(768) if is_postgres else sa.JSON(none_as_null=True)
+    # SQLite recreates a table for batch operations. Renaming `embedding` and
+    # adding a new column with that same name must happen in separate batches,
+    # otherwise Alembic collapses the two columns and loses the legacy data.
     with op.batch_alter_table("chunks") as batch:
         batch.alter_column("embedding", new_column_name="legacy_embedding", existing_type=sa.JSON())
+    with op.batch_alter_table("chunks") as batch:
         batch.add_column(sa.Column("embedding", vector_type, nullable=True))
         batch.add_column(sa.Column("embedding_model", sa.String(255), nullable=True))
         batch.add_column(sa.Column("embedding_version", sa.String(128), nullable=True))
@@ -36,4 +40,5 @@ def downgrade() -> None:
         batch.drop_column("embedding_version")
         batch.drop_column("embedding_model")
         batch.drop_column("embedding")
+    with op.batch_alter_table("chunks") as batch:
         batch.alter_column("legacy_embedding", new_column_name="embedding", existing_type=sa.JSON())
