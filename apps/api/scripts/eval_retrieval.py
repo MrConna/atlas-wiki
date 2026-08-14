@@ -73,14 +73,24 @@ def main() -> None:
     for row in rows:
         by_class[row["class"]].append(row)
 
-    def recall_at(group: list[dict], k: int) -> float:
+    def hit_rate_at(group: list[dict], k: int) -> float:
         return sum(bool(row["ranks"] and min(row["ranks"]) <= k) for row in group) / len(group) if group else 0.0
+
+    def recall_at(group: list[dict], k: int) -> float:
+        return (
+            sum(sum(rank <= k for rank in row["ranks"]) / len(row["relevant"]) for row in group) / len(group)
+            if group
+            else 0.0
+        )
 
     report = {
         "backend": "feature-hash",
         "mode": args.mode,
         "query_count": len(rows),
         "metrics": {
+            "hit_rate_at_1": hit_rate_at(answerable, 1),
+            "hit_rate_at_3": hit_rate_at(answerable, 3),
+            "hit_rate_at_5": hit_rate_at(answerable, 5),
             "recall_at_1": recall_at(answerable, 1),
             "recall_at_3": recall_at(answerable, 3),
             "recall_at_5": recall_at(answerable, 5),
@@ -92,7 +102,12 @@ def main() -> None:
             / len(by_class["cross_doc"]),
             "unrelated_false_positive_rate": sum(bool(row["returned"]) for row in unrelated) / len(unrelated),
         },
-        "class_recall_at_5": {name: recall_at(group, 5) for name, group in sorted(by_class.items())},
+        "class_hit_rate_at_5": {name: hit_rate_at(group, 5) for name, group in sorted(by_class.items())},
+        "class_recall_at_5": {
+            name: recall_at([row for row in group if row["expect_answerable"]], 5)
+            for name, group in sorted(by_class.items())
+            if any(row["expect_answerable"] for row in group)
+        },
         "queries": rows,
     }
     rendered = json.dumps(report, indent=2, ensure_ascii=False)

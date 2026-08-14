@@ -1,4 +1,6 @@
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 
@@ -15,3 +17,18 @@ def test_retrieval_fixture_is_well_formed():
     assert len({query["id"] for query in queries}) == len(queries)
     assert all(set(query["relevant"]) <= doc_keys for query in queries)
     assert all(bool(query["relevant"]) == query["expect_answerable"] for query in queries)
+
+
+def test_hybrid_retrieval_baseline_is_executable_and_stable():
+    api_dir = Path(__file__).parents[1]
+    command = [sys.executable, "scripts/eval_retrieval.py", "--mode", "hybrid"]
+    first = subprocess.run(command, cwd=api_dir, check=True, capture_output=True, text=True).stdout
+    second = subprocess.run(command, cwd=api_dir, check=True, capture_output=True, text=True).stdout
+    assert first == second
+
+    report = json.loads(first)
+    assert report["query_count"] == 20
+    assert report["metrics"]["hit_rate_at_5"] == 0.75
+    assert report["metrics"]["cross_doc_all_relevant_at_5"] == 0.5
+    assert report["metrics"]["unrelated_false_positive_rate"] == 0.75
+    assert report["class_hit_rate_at_5"]["exact"] == 1.0

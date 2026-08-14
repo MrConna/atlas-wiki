@@ -8,7 +8,7 @@ Run the current baseline from `apps/api`:
 python scripts/eval_retrieval.py --mode hybrid --json retrieval-baseline.json
 ```
 
-The query set covers exact terms, English and Chinese paraphrases, cross-document questions, unrelated questions, and adversarial wording. Reports include Recall@1/3/5, MRR@10, cross-document all-relevant Recall@5, unrelated false-positive rate, per-class Recall@5, deterministic rerun checks, and per-query ranks/scores.
+The query set covers exact terms, English and Chinese paraphrases, cross-document questions, unrelated questions, and adversarial wording. Reports include Hit Rate@1/3/5, standard Recall@1/3/5, MRR@10, cross-document all-relevant Recall@5, unrelated false-positive rate, per-class metrics, deterministic rerun checks, and per-query ranks/scores. Hit Rate asks whether at least one relevant source was retrieved; Recall measures the fraction of all relevant sources retrieved.
 
 ## Release targets for native vector retrieval
 
@@ -26,7 +26,7 @@ The fixture is intentionally small and is a first release gate, not a claim of g
 
 Measured on fixture version 1 before the pgvector migration:
 
-| Mode | Recall@1 | Recall@5 | MRR@10 | Cross-doc all@5 | Unrelated FP |
+| Mode | Hit@1 | Hit@5 | MRR@10 | Cross-doc all@5 | Unrelated FP |
 | --- | ---: | ---: | ---: | ---: | ---: |
 | keyword | 0.625 | 0.625 | 0.625 | 0.50 | 0.75 |
 | semantic | 0.688 | 0.750 | 0.708 | 1.00 | 1.00 |
