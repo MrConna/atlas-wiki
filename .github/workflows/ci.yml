@@ -1,0 +1,80 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t atlas-wiki-api-ci apps/api
+      - name: API tests
+        run: >-
+          docker run --rm -v "$PWD/apps/api/tests:/app/tests:ro"
+          atlas-wiki-api-ci sh -lc "pip install -q '.[dev]' && pytest -q"
+      - run: bash -n scripts/backup.sh scripts/restore.sh
+      - run: python3 -m unittest discover -s tests
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: npm audit --omit=dev
+
+  compose:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - run: docker compose config --quiet
+      - run: docker compose -f compose.yaml -f compose.ollama.yaml config --quiet
+
+  backup-restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cp .env.example .env
+      - name: Start clean Atlas
+        run: docker compose up -d --build db api
+      - name: Wait for API
+        run: |
+          for attempt in {1..60}; do
+            curl --fail --silent http://127.0.0.1:8000/api/v1/health && exit 0
+            sleep 2
+          done
+          exit 1
+      - name: Import fixture and back up
+        run: |
+          curl --fail --silent --show-error \
+            -F 'file=@apps/api/tests/fixtures/retrieval/corpus/codex-prompting.md;type=text/markdown' \
+            http://127.0.0.1:8000/api/v1/imports >/dev/null
+          scripts/backup.sh "$RUNNER_TEMP/atlas-ci-backup.tar.gz"
+      - name: Destroy and recreate empty target
+        run: |
+          docker compose down -v
+          find uploads -mindepth 1 -maxdepth 1 ! -name .gitkeep -type f -delete
+          docker compose up -d db
+      - name: Restore and verify
+        run: |
+          scripts/restore.sh "$RUNNER_TEMP/atlas-ci-backup.tar.gz"
+          docker compose up -d api
+          docker compose exec -T api python scripts/verify_storage.py
+          test "$(docker compose exec -T db psql -U atlas -d atlas -Atqc 'SELECT count(*) FROM documents')" = 1
+      - if: always()
+        run: docker compose down -v
