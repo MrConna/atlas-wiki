@@ -5,6 +5,8 @@ import hashlib
 import sys
 from pathlib import Path
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import select, text
 
 from app.config import settings
@@ -19,6 +21,9 @@ def main() -> int:
         version = db.execute(text("SELECT version_num FROM alembic_version")).scalar_one_or_none()
         if not version:
             failures.append("database has no Alembic version")
+        code_heads = ScriptDirectory.from_config(Config("alembic.ini")).get_heads()
+        if len(code_heads) != 1 or version != code_heads[0]:
+            failures.append("database revision does not match the single code head")
         page_ids = set(db.scalars(select(Page.id)).all())
         documents = list(db.scalars(select(Document)).all())
         chunks = list(db.scalars(select(Chunk)).all())

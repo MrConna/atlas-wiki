@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Safely unpack the fixed Atlas backup bundle layout."""
 
+import json
 import shutil
 import sys
 import tarfile
@@ -22,6 +23,15 @@ def main() -> int:
             raise ValueError("backup bundle has unexpected or duplicate members")
         if any(not member.isfile() for member in members):
             raise ValueError("backup bundle members must be regular files")
+        manifest_source = bundle.extractfile(bundle.getmember("manifest.json"))
+        if manifest_source is None:
+            raise ValueError("cannot read backup manifest")
+        manifest = json.load(manifest_source)
+        if manifest.get("format_version") != 1:
+            raise ValueError("unsupported backup format version")
+        required_strings = ("created_at", "git_sha", "alembic_version")
+        if not all(isinstance(manifest.get(key), str) and manifest[key] for key in required_strings):
+            raise ValueError("backup manifest is incomplete")
         for member in members:
             source = bundle.extractfile(member)
             if source is None:
@@ -34,4 +44,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

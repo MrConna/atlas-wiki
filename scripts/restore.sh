@@ -44,7 +44,18 @@ if [[ ${#restart_services[@]} -gt 0 ]]; then
   docker compose stop "${restart_services[@]}" >/dev/null
 fi
 
-docker compose exec -T db pg_isready -U atlas -d postgres >/dev/null
+database_ready=false
+for _attempt in $(seq 1 60); do
+  if docker compose exec -T db pg_isready -U atlas -d postgres >/dev/null 2>&1; then
+    database_ready=true
+    break
+  fi
+  sleep 1
+done
+if [[ "$database_ready" != true ]]; then
+  echo "Database did not become ready for restore" >&2
+  exit 3
+fi
 has_pages=$(docker compose exec -T db psql -U atlas -d atlas -Atqc \
   "SELECT CASE WHEN to_regclass('public.pages') IS NULL THEN 'no' ELSE 'yes' END")
 if [[ "$has_pages" == yes ]]; then
@@ -64,4 +75,5 @@ docker compose exec -T db pg_restore -U atlas -d atlas --single-transaction \
   --no-owner --no-acl --exit-on-error \
   <"$tmp_dir/database.dump"
 python3 scripts/unpack_uploads.py "$tmp_dir/uploads.tar" uploads
+docker compose run --rm --no-deps --entrypoint python api scripts/verify_storage.py
 echo "Restore completed. Start the API and run: docker compose exec api python scripts/verify_storage.py"
