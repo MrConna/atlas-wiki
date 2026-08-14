@@ -49,6 +49,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: Install age
+        run: sudo apt-get update -qq && sudo apt-get install -y age
       - run: cp .env.example .env
       - name: Start clean Atlas
         run: docker compose up -d --build db api
@@ -61,10 +63,13 @@ jobs:
           exit 1
       - name: Import fixture and back up
         run: |
+          age-keygen -o "$RUNNER_TEMP/atlas-ci-identity.txt" 2>/dev/null
+          age-keygen -y "$RUNNER_TEMP/atlas-ci-identity.txt" > "$RUNNER_TEMP/atlas-ci-recipient.txt"
           curl --fail --silent --show-error \
             -F 'file=@apps/api/tests/fixtures/retrieval/corpus/codex-prompting.md;type=text/markdown' \
             http://127.0.0.1:8000/api/v1/imports >/dev/null
-          scripts/backup.sh "$RUNNER_TEMP/atlas-ci-backup.tar.gz"
+          scripts/backup.sh --recipient "$(<"$RUNNER_TEMP/atlas-ci-recipient.txt")" \
+            "$RUNNER_TEMP/atlas-ci-backup.tar.gz.age"
       - name: Destroy and recreate empty target
         run: |
           docker compose down -v
@@ -72,7 +77,8 @@ jobs:
           docker compose up -d db
       - name: Restore and verify
         run: |
-          scripts/restore.sh "$RUNNER_TEMP/atlas-ci-backup.tar.gz"
+          scripts/restore.sh --identity "$RUNNER_TEMP/atlas-ci-identity.txt" \
+            "$RUNNER_TEMP/atlas-ci-backup.tar.gz.age"
           docker compose up -d api
           docker compose exec -T api python scripts/verify_storage.py
           test "$(docker compose exec -T db psql -U atlas -d atlas -Atqc 'SELECT count(*) FROM documents')" = 1

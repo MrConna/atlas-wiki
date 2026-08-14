@@ -96,14 +96,17 @@ Backfill is resumable and model-aware. It preserves the old feature-hash vectors
 
 ## Backup and restore
 
-Back up PostgreSQL and uploaded source files from one stopped-write window:
+Back up PostgreSQL and uploaded source files from one stopped-write window.
+Atlas encrypts the archive to an age recipient by default:
 
 ```bash
-scripts/backup.sh /secure/path/atlas-backup.tar.gz
+scripts/backup.sh --recipient "$ATLAS_BACKUP_AGE_RECIPIENT" \
+  /secure/path/atlas-backup.tar.gz.age
 ```
 
-The generated archive contains document content and is **not encrypted by
-Atlas**. Store it only on encrypted storage or encrypt it before copying it.
+Restore with the corresponding private identity file; never commit or pass the
+identity contents on the command line. Plaintext archives require the explicit
+`--allow-plaintext` development-only flag.
 
 Restoration verifies checksums and refuses to overwrite non-empty data. See
 [`docs/BACKUP_RESTORE.md`](docs/BACKUP_RESTORE.md) for clean-environment
