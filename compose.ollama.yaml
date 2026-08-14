@@ -1,0 +1,30 @@
+services:
+  ollama:
+    image: ollama/ollama:0.11.10
+    volumes:
+      - atlas_ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  ollama-model:
+    image: ollama/ollama:0.11.10
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+    command: ["pull", "embeddinggemma:300m-qat-q4_0"]
+    depends_on:
+      ollama:
+        condition: service_healthy
+
+  api:
+    environment:
+      EMBEDDING_PROVIDER: ollama
+      EMBEDDING_BASE_URL: http://ollama:11434
+    depends_on:
+      ollama-model:
+        condition: service_completed_successfully
+
+volumes:
+  atlas_ollama:

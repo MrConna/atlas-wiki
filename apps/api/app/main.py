@@ -17,7 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .config import settings
-from .database import Base, SessionLocal, engine, get_db
+from .database import SessionLocal, get_db
 from .models import Chunk, Document, Page
 from .providers import generate_answer
 from .retrieval import chunk_text, cosine_similarity, embed_text, keyword_score
@@ -65,14 +65,13 @@ def rebuild_chunks(page: Page) -> None:
                 heading_path=str(item["heading"]),
                 source_location=f"{item['heading']} · chunk {int(item['position']) + 1}",
                 position=int(item["position"]),
-                embedding=embed_text(chunk_content),
+                legacy_embedding=embed_text(chunk_content),
             )
         )
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    Base.metadata.create_all(engine)
     upload_dir = Path(settings.upload_dir)
     upload_dir.mkdir(parents=True, exist_ok=True)
     with SessionLocal() as db:
@@ -298,7 +297,7 @@ def search_chunks(db: Session, query: str, limit: int, mode: str = "hybrid") -> 
     for chunk, page in candidates:
         text = f"{page.title}\n{chunk.content}"
         keyword = keyword_score(query, text)
-        semantic = cosine_similarity(query_embedding, chunk.embedding or embed_text(chunk.content))
+        semantic = cosine_similarity(query_embedding, chunk.legacy_embedding or embed_text(chunk.content))
         score = keyword if mode == "keyword" else semantic if mode == "semantic" else 0.55 * keyword + 0.45 * semantic
         if score >= 0.12:
             scored.append((chunk, page, score))

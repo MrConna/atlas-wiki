@@ -21,6 +21,8 @@ The MVP is a single-user local application and has no authentication. Do not exp
 
 Atlas remains local-first when generation is disabled or uses a local Ollama endpoint. Enabling DeepSeek or another OpenAI-compatible cloud provider sends the retrieved document chunks needed for each answer to that provider. Treat provider API keys and configurable provider base URLs as administrator-controlled secrets and trust boundaries; do not enable a cloud provider for private content unless its data-handling terms are acceptable.
 
+Native embeddings send page titles, chunks, and search queries to the configured embedding endpoint. The bundled Ollama override keeps that traffic on the internal Compose network and exposes no Ollama host port. A remote embedding base URL is an administrator-controlled trust boundary and should use TLS; Atlas never silently falls back between embedding models because mixing vector spaces produces misleading retrieval.
+
 ## Reporting
 
 Do not include private documents, model keys, or authorization codes in issue reports. Rotate any credential accidentally posted to chat or version control.
