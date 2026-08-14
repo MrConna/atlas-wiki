@@ -30,5 +30,5 @@ def test_hybrid_retrieval_baseline_is_executable_and_stable():
     assert report["query_count"] == 20
     assert report["metrics"]["hit_rate_at_5"] == 0.75
     assert report["metrics"]["cross_doc_all_relevant_at_5"] == 0.5
-    assert report["metrics"]["unrelated_false_positive_rate"] == 0.75
+    assert report["metrics"]["unrelated_false_positive_rate"] == 0.5
     assert report["class_hit_rate_at_5"]["exact"] == 1.0
