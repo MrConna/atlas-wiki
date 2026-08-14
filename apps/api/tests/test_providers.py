@@ -179,6 +179,12 @@ def test_missing_key_fails_before_network(monkeypatch):
         asyncio.run(providers.generate_answer("Question?", ["Evidence."]))
 
 
+def test_active_provider_without_model_fails_before_network(monkeypatch):
+    monkeypatch.setattr(providers.settings, "model_name", "")
+    with pytest.raises(providers.ModelConfigurationError):
+        asyncio.run(providers.generate_answer("Question?", ["Evidence."]))
+
+
 def test_cancellation_is_not_converted_to_provider_error(monkeypatch):
     install_client(monkeypatch, [asyncio.CancelledError()])
     with pytest.raises(asyncio.CancelledError):

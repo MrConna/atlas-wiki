@@ -133,8 +133,10 @@ async def _post_with_retries(url: str, headers: dict, payload: dict) -> httpx.Re
 
 async def generate_answer(question: str, evidence: list[str]) -> str | None:
     provider = settings.model_provider.lower()
-    if provider == "none" or not settings.model_name:
+    if provider == "none":
         return None
+    if not settings.model_name:
+        raise ModelConfigurationError("Model name is not configured")
     context = "\n\n".join(f"[{index}] {text}" for index, text in enumerate(evidence, 1))
     prompt = f"Evidence:\n{context}\n\nQuestion: {question}"
     if len(prompt) > settings.model_max_prompt_chars:
