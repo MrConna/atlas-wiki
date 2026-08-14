@@ -115,6 +115,32 @@ def test_citation_validation_allows_dotted_identifiers(monkeypatch):
     assert answer["evidence"] == "sufficient"
 
 
+def test_uncited_claim_without_space_after_terminator_is_rejected(monkeypatch):
+    client.post("/api/v1/pages", json={"title": "Facts", "content": "A supported fact."})
+
+    async def fake_generate(_question, _evidence):
+        return "Supported fact [1].Fabricated uncited claim。另一个无引用事实"
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "supported fact"}).json()
+    assert answer["evidence"] == "insufficient"
+    assert "did not produce verifiable" in answer["answer"]
+
+
+def test_ask_exposes_the_same_complete_chunk_sent_to_the_model(monkeypatch):
+    long_evidence = "traceable start " + "context " * 100 + "traceable end"
+    client.post("/api/v1/pages", json={"title": "Full evidence", "content": long_evidence})
+
+    async def fake_generate(_question, evidence):
+        assert evidence[0] == long_evidence
+        return "The evidence has a traceable end [1]."
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "traceable end"}).json()
+    assert answer["evidence"] == "sufficient"
+    assert answer["citations"][0]["excerpt"] == long_evidence
+
+
 def test_cited_model_refusal_is_reported_as_insufficient(monkeypatch):
     client.post(
         "/api/v1/pages",

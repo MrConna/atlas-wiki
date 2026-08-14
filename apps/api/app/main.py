@@ -334,7 +334,7 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
             page_id=page.id,
             chunk_id=chunk.id,
             title=page.title,
-            excerpt=chunk.content[:400],
+            excerpt=chunk.content,
             source_location=chunk.source_location,
             heading_path=chunk.heading_path,
         )
@@ -359,9 +359,14 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
     markers = {int(value) for value in re.findall(r"\[(\d+)\]", generated)}
     factual_sentences = []
     for line in generated.splitlines():
-        # Split only at punctuation followed by whitespace so dotted identifiers
-        # such as `AGENTS.md` do not become uncited pseudo-sentences.
-        for sentence in re.split(r"(?<=[.!?。！？])\s+", line):
+        # Protect punctuation inside inline-code identifiers such as `AGENTS.md`,
+        # then split at every remaining terminator even when no space follows.
+        protected_line = re.sub(
+            r"`[^`]*`",
+            lambda match: match.group(0).translate(str.maketrans(".!?。！？", "․⁉¿﹒﹗﹖")),
+            line,
+        )
+        for sentence in re.findall(r"[^.!?。！？]+(?:[.!?。！？](?:\s*\[\d+\])*)?", protected_line):
             if len(re.findall(r"[\w\u4e00-\u9fff]+", sentence)) >= 3:
                 factual_sentences.append(sentence.strip())
     every_sentence_cited = factual_sentences and all(re.search(r"\[\d+\]", sentence) for sentence in factual_sentences)
