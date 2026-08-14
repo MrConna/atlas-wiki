@@ -78,16 +78,18 @@ def test_ask_reports_insufficient_evidence():
 
 
 def test_generated_answer_gets_a_citation_marker(monkeypatch):
-    client.post("/api/v1/pages", json={"title": "Grounding", "content": "Citations make claims traceable."})
+    long_evidence = "Citations make claims traceable. " + "context " * 80
+    client.post("/api/v1/pages", json={"title": "Grounding", "content": long_evidence})
 
-    async def fake_generate(_question, _evidence):
-        return "Claims are traceable. [1]"
+    async def fake_generate(_question, evidence):
+        assert len(evidence[0]) > 400
+        return "Claims are traceable [1]."
 
     monkeypatch.setattr("app.main.generate_answer", fake_generate)
     answer = client.post("/api/v1/ask", json={"question": "traceable"})
     assert answer.status_code == 200
     assert answer.json()["evidence"] == "sufficient"
-    assert answer.json()["answer"].endswith("[1]")
+    assert "[1]" in answer.json()["answer"]
 
 
 def test_generated_answer_without_valid_citation_is_rejected(monkeypatch):
@@ -100,6 +102,58 @@ def test_generated_answer_without_valid_citation_is_rejected(monkeypatch):
     answer = client.post("/api/v1/ask", json={"question": "grounded fact"}).json()
     assert answer["evidence"] == "insufficient"
     assert "did not produce verifiable" in answer["answer"]
+
+
+def test_citation_validation_allows_dotted_identifiers(monkeypatch):
+    client.post("/api/v1/pages", json={"title": "Instructions", "content": "AGENTS.md contains project guidance."})
+
+    async def fake_generate(_question, _evidence):
+        return "Codex reads `AGENTS.md` for project guidance [1]."
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "AGENTS.md guidance"}).json()
+    assert answer["evidence"] == "sufficient"
+
+
+def test_uncited_claim_without_space_after_terminator_is_rejected(monkeypatch):
+    client.post("/api/v1/pages", json={"title": "Facts", "content": "A supported fact."})
+
+    async def fake_generate(_question, _evidence):
+        return "Supported fact [1].Fabricated claim!Encryption fails。伪造事实"
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "supported fact"}).json()
+    assert answer["evidence"] == "insufficient"
+    assert "did not produce verifiable" in answer["answer"]
+
+
+def test_ask_exposes_the_same_complete_chunk_sent_to_the_model(monkeypatch):
+    long_evidence = "traceable start " + "context " * 100 + "traceable end"
+    client.post("/api/v1/pages", json={"title": "Full evidence", "content": long_evidence})
+
+    async def fake_generate(_question, evidence):
+        assert evidence[0] == long_evidence
+        return "The evidence has a traceable end [1]."
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "traceable end"}).json()
+    assert answer["evidence"] == "sufficient"
+    assert answer["citations"][0]["excerpt"] == long_evidence
+
+
+def test_cited_model_refusal_is_reported_as_insufficient(monkeypatch):
+    client.post(
+        "/api/v1/pages",
+        json={"title": "Scope", "content": "Questions about baking bread are outside this software documentation's scope."},
+    )
+
+    async def fake_generate(_question, _evidence):
+        return "INSUFFICIENT_EVIDENCE The sources contain no baking instructions [1]."
+
+    monkeypatch.setattr("app.main.generate_answer", fake_generate)
+    answer = client.post("/api/v1/ask", json={"question": "How do I bake bread?"}).json()
+    assert answer["evidence"] == "insufficient"
+    assert answer["answer"] == "The sources contain no baking instructions [1]."
 
 
 def test_search_handles_one_thousand_pages():

@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     model_name: str = ""
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
     ollama_base_url: str = "http://host.docker.internal:11434"
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")

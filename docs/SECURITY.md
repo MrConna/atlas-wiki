@@ -17,6 +17,10 @@
 
 The MVP is a single-user local application and has no authentication. Do not expose ports 3000 or 8000 to an untrusted network. Add authentication, TLS, rate limiting, malware scanning, and a sandboxed PDF parser before multi-user or public deployment.
 
+## Cloud model boundary
+
+Atlas remains local-first when generation is disabled or uses a local Ollama endpoint. Enabling DeepSeek or another OpenAI-compatible cloud provider sends the retrieved document chunks needed for each answer to that provider. Treat provider API keys and configurable provider base URLs as administrator-controlled secrets and trust boundaries; do not enable a cloud provider for private content unless its data-handling terms are acceptable.
+
 ## Reporting
 
 Do not include private documents, model keys, or authorization codes in issue reports. Rotate any credential accidentally posted to chat or version control.

@@ -334,7 +334,7 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
             page_id=page.id,
             chunk_id=chunk.id,
             title=page.title,
-            excerpt=chunk.content[:400],
+            excerpt=chunk.content,
             source_location=chunk.source_location,
             heading_path=chunk.heading_path,
         )
@@ -347,7 +347,7 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
             citations=[],
         )
     try:
-        generated = await generate_answer(payload.question, [citation.excerpt for citation in citations])
+        generated = await generate_answer(payload.question, [chunk.content for chunk, _page, _score in rows])
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Model provider failed: {type(exc).__name__}") from exc
     if generated is None:
@@ -359,8 +359,16 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
     markers = {int(value) for value in re.findall(r"\[(\d+)\]", generated)}
     factual_sentences = []
     for line in generated.splitlines():
-        for sentence in re.findall(r"[^.!?。！？]+(?:[.!?。！？](?:\s*\[\d+\])*)?", line):
-            if len(re.findall(r"[\w\u4e00-\u9fff]+", sentence)) >= 3:
+        # Protect punctuation inside inline-code identifiers such as `AGENTS.md`,
+        # then split at every remaining terminator even when no space follows.
+        protected_line = re.sub(
+            r"`[^`]*`",
+            lambda match: match.group(0).translate(str.maketrans(".!?。！？", "․⁉¿﹒﹗﹖")),
+            line,
+        )
+        for sentence in re.findall(r"[^.!?。！？]+(?:[.!?。！？](?:\s*\[\d+\])*)?", protected_line):
+            content_without_citations = re.sub(r"\[\d+\]", "", sentence)
+            if re.search(r"[\w\u4e00-\u9fff]", content_without_citations):
                 factual_sentences.append(sentence.strip())
     every_sentence_cited = factual_sentences and all(re.search(r"\[\d+\]", sentence) for sentence in factual_sentences)
     if not markers or any(marker < 1 or marker > len(citations) for marker in markers) or not every_sentence_cited:
@@ -369,6 +377,10 @@ async def ask(payload: AskRequest, db: Session = Depends(get_db)):
             evidence="insufficient",
             citations=citations,
         )
+    insufficient_marker = "INSUFFICIENT_EVIDENCE"
+    if generated.startswith(insufficient_marker):
+        refusal = generated[len(insufficient_marker) :].lstrip(" :—-\n")
+        return AskResponse(answer=refusal, evidence="insufficient", citations=citations)
     return AskResponse(answer=generated, evidence="sufficient", citations=citations)
 
 
