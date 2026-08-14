@@ -4,6 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     app_name: str = "Atlas Wiki API"
+    app_git_sha: str = "unknown"
     database_url: str = "sqlite:///./atlas.db"
     cors_origins: str = "http://localhost:3000"
     allowed_hosts: str = "localhost,127.0.0.1,api,testserver"

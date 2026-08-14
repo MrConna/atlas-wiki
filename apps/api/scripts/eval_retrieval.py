@@ -13,6 +13,18 @@ def load_jsonl(path: Path) -> list[dict]:
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
+def native_environment_gates(metadata: dict, git_sha: str, model_digest: str, expected_corpus: list[dict]) -> dict:
+    identity = str(metadata.get("model_identity", ""))
+    return {
+        "native_backend": metadata.get("backend") == "native-pgvector",
+        "deployed_git_sha": metadata.get("app_git_sha") == git_sha,
+        "embedding_dimensions": metadata.get("dimensions") == 768,
+        "embedding_model_digest": f"@{model_digest}:dim768:" in identity,
+        "all_chunks_current": metadata.get("total_chunks") == metadata.get("current_chunks"),
+        "exact_fixture_corpus": metadata.get("corpus") == expected_corpus,
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate Atlas retrieval through its public API")
     parser.add_argument("--mode", choices=("keyword", "semantic", "hybrid"), default="hybrid")
@@ -27,6 +39,10 @@ def main() -> None:
         help="Fail unless the native hybrid retrieval release gates are met",
     )
     parser.add_argument("--git-sha", help="Exact 40-character commit SHA recorded in native reports")
+    parser.add_argument(
+        "--expected-model-digest",
+        help="Exact Ollama model digest required by the native release gate",
+    )
     args = parser.parse_args()
 
     fixture_dir = Path(__file__).resolve().parents[1] / "tests" / "fixtures" / "retrieval"
@@ -37,6 +53,22 @@ def main() -> None:
         for path in sorted(fixture_dir.rglob("*"))
         if path.is_file()
     }
+    expected_corpus = []
+    for document in manifest["documents"]:
+        path = fixture_dir / document["file"]
+        content = path.read_text(encoding="utf-8-sig").strip()
+        title = Path(document["file"]).stem
+        from app.retrieval import chunk_text
+
+        expected_corpus.append(
+            {
+                "title": title,
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "chunk_count": len(chunk_text(content, title)),
+                "current_chunk_count": len(chunk_text(content, title)),
+            }
+        )
+    expected_corpus.sort(key=lambda item: (item["title"], item["content_sha256"]))
 
     def execute_queries(client) -> list[dict]:
         rows = []
@@ -76,13 +108,6 @@ def main() -> None:
             retrieval_status = client.get("/api/v1/retrieval/status")
             retrieval_status.raise_for_status()
             backend_metadata = retrieval_status.json()
-            actual_titles = {page["title"] for page in client.get("/api/v1/pages").json()}
-            expected_titles = {document["doc_key"] for document in manifest["documents"]}
-            if args.assert_native_gates and actual_titles != expected_titles:
-                raise SystemExit(
-                    f"Native gate requires the exact fixture corpus; expected {sorted(expected_titles)}, "
-                    f"found {sorted(actual_titles)}"
-                )
             rows = execute_queries(client)
     else:
         with tempfile.TemporaryDirectory(prefix="atlas-retrieval-eval-") as temp_dir:
@@ -158,8 +183,12 @@ def main() -> None:
             parser.error("--assert-native-gates requires --base-url and --mode hybrid")
         if not args.git_sha or not re.fullmatch(r"[0-9a-f]{40}", args.git_sha):
             parser.error("--assert-native-gates requires --git-sha with the exact 40-character commit SHA")
+        if not args.expected_model_digest or not re.fullmatch(r"[0-9a-f]{64}", args.expected_model_digest):
+            parser.error("--assert-native-gates requires --expected-model-digest with 64 lowercase hex characters")
         gates = {
-            "native_backend": report["backend"] == "native-pgvector",
+            **native_environment_gates(
+                backend_metadata, args.git_sha, args.expected_model_digest, expected_corpus
+            ),
             "recall_at_5": report["metrics"]["recall_at_5"] >= 0.80,
             "mrr_at_10": report["metrics"]["mrr_at_10"] >= 0.65,
             "cross_doc_all_relevant_at_5": report["metrics"]["cross_doc_all_relevant_at_5"] >= 0.75,

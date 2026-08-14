@@ -1,4 +1,6 @@
 FROM python:3.12-slim
+ARG APP_GIT_SHA=unknown
+ENV APP_GIT_SHA=${APP_GIT_SHA}
 WORKDIR /app
 COPY pyproject.toml ./
 COPY app ./app

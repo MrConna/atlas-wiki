@@ -14,7 +14,10 @@ services:
       retries: 10
 
   api:
-    build: ./apps/api
+    build:
+      context: ./apps/api
+      args:
+        APP_GIT_SHA: ${APP_GIT_SHA:-unknown}
     environment:
       DATABASE_URL: postgresql+psycopg://atlas:atlas@db:5432/atlas
       MODEL_PROVIDER: ${MODEL_PROVIDER:-none}

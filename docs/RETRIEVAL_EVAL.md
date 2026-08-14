@@ -28,6 +28,7 @@ Run the native integration gate against an already populated Atlas API containin
 python scripts/eval_retrieval.py --mode hybrid \
   --base-url http://127.0.0.1:8000 \
   --git-sha "$(git rev-parse HEAD)" \
+  --expected-model-digest 101341d65c2ccbf23f16650b79d30b9fca94a45ffa09a9984c600157b81a58df \
   --assert-native-gates --json retrieval-native.json
 ```
 

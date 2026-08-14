@@ -481,8 +481,24 @@ def search(
 @app.get("/api/v1/retrieval/status")
 def retrieval_status(db: Session = Depends(get_db)):
     total = db.scalar(select(func.count()).select_from(Chunk)) or 0
+    corpus_rows = db.execute(
+        select(
+            Page.id,
+            Page.title,
+            Page.content,
+            Chunk.id,
+            Chunk.embedding,
+            Chunk.embedding_model,
+            Chunk.embedding_version,
+        ).outerjoin(Chunk, Chunk.page_id == Page.id)
+    ).all()
     if settings.embedding_provider != "ollama":
-        return {"backend": "feature-hash", "total_chunks": total, "current_chunks": total}
+        return {
+            "backend": "feature-hash",
+            "app_git_sha": settings.app_git_sha,
+            "total_chunks": total,
+            "current_chunks": total,
+        }
     provider = get_embedding_provider()
     try:
         identity = provider.resolve_identity().value
@@ -497,12 +513,29 @@ def retrieval_status(db: Session = Depends(get_db)):
             Chunk.embedding_version == PROMPT_SCHEMA_VERSION,
         )
     ) or 0
+    corpus = {}
+    for page_id, title, content, chunk_id, embedding, embedding_model, embedding_version in corpus_rows:
+        item = corpus.setdefault(
+            page_id,
+            {
+                "title": title,
+                "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                "chunk_count": 0,
+                "current_chunk_count": 0,
+            },
+        )
+        if chunk_id is not None:
+            item["chunk_count"] += 1
+            if embedding is not None and embedding_model == identity and embedding_version == PROMPT_SCHEMA_VERSION:
+                item["current_chunk_count"] += 1
     return {
         "backend": "native-pgvector" if db.bind and db.bind.dialect.name == "postgresql" else "native-test",
+        "app_git_sha": settings.app_git_sha,
         "dimensions": settings.embedding_dimensions,
         "model_identity": identity,
         "total_chunks": total,
         "current_chunks": current,
+        "corpus": sorted(corpus.values(), key=lambda item: (item["title"], item["content_sha256"])),
     }
 
 

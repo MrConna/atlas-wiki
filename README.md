@@ -59,6 +59,7 @@ Atlas supports a private multilingual embedding path using Ollama, EmbeddingGemm
 Start the optional bundled Ollama service and pull the pinned model tag:
 
 ```bash
+export APP_GIT_SHA="$(git rev-parse HEAD)"
 docker compose -f compose.yaml -f compose.ollama.yaml up -d --build
 docker compose exec api python -m app.cli embeddings-backfill
 ```
