@@ -1,6 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 type Page = { id: string; title: string; slug: string; content: string; source_type: string; category: string | null; updated_at: string };
 type PageLinks = { outbound: Page[]; backlinks: Page[] };
@@ -186,7 +188,8 @@ export default function Home() {
 
             {selectedPage && <section className="sourcePanel" ref={sourcePanelRef}>
               <div className="sectionTitle"><p className="eyebrow">SOURCE · {selectedPage.slug}</p><button onClick={() => { setSelectedPage(null); setSelectedExcerpt(""); }}>Close</button></div>
-              <h2>{selectedPage.title}</h2>{selectedExcerpt && <blockquote>{selectedExcerpt}</blockquote>}<pre>{selectedPage.content}</pre>
+              <h2>{selectedPage.title}</h2>{selectedExcerpt && <blockquote>{selectedExcerpt}</blockquote>}
+              <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedPage.content}</ReactMarkdown></div>
               {(links.outbound.length > 0 || links.backlinks.length > 0) && <div className="connections">
                 <div><b>Links to</b>{links.outbound.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
                 <div><b>Linked from</b>{links.backlinks.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
