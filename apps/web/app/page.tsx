@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 type Page = { id: string; title: string; slug: string; content: string; source_type: string; category: string | null; updated_at: string };
 type PageLinks = { outbound: Page[]; backlinks: Page[] };
@@ -19,6 +19,11 @@ export default function Home() {
   const [links, setLinks] = useState<PageLinks>({ outbound: [], backlinks: [] });
   const [selectedExcerpt, setSelectedExcerpt] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
+  const sourcePanelRef = useRef<HTMLElement>(null);
+
+  useEffect(() => {
+    if (selectedPage) sourcePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, [selectedPage]);
 
   async function loadPages() {
     try {
@@ -141,6 +146,7 @@ export default function Home() {
 
   const categories = [...new Set(pages.map((page) => page.category).filter((category): category is string => Boolean(category)))].sort();
   const visiblePages = categoryFilter === null ? pages : pages.filter((page) => page.category === categoryFilter);
+  const connectionsPage = pages.find((page) => page.category === "connections");
 
   return (
     <main>
@@ -163,36 +169,50 @@ export default function Home() {
       </section>
 
       <section className="workspace">
-        <form className="searchbox" onSubmit={ask}>
-          <div className="searchrow"><b>⌕</b><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask anything in your knowledge base…" /><button className="ask" disabled={busy}>Ask</button></div>
-          <div className="evidence"><span>Atlas answers only when it finds supporting evidence.</span><strong>{pages.length} sources indexed</strong></div>
-        </form>
+        <div className="workspaceGrid">
+          <div className="main">
+            <form className="searchbox" onSubmit={ask}>
+              <div className="searchrow"><b>⌕</b><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask anything in your knowledge base…" /><button className="ask" disabled={busy}>Ask</button></div>
+              <div className="evidence"><span>Atlas answers only when it finds supporting evidence.</span><strong>{pages.length} sources indexed</strong></div>
+            </form>
 
-        {answer && <section className="answer">
-          <p className="eyebrow">ANSWER · {answer.evidence.replace("_", " ")}</p>
-          <div className="answerText">{answer.answer}</div>
-          <div className="citations">{answer.citations.map((citation, index) => <article key={citation.chunk_id}>
-            <small>[{index + 1}] {citation.source_location}</small><h2>{citation.title}</h2><p>{citation.excerpt}</p><button onClick={() => openPage(citation.page_id, citation.excerpt)}>View exact source</button>
-          </article>)}</div>
-        </section>}
+            {answer && <section className="answer">
+              <p className="eyebrow">ANSWER · {answer.evidence.replace("_", " ")}</p>
+              <div className="answerText">{answer.answer}</div>
+              <div className="citations">{answer.citations.map((citation, index) => <article key={citation.chunk_id}>
+                <small>[{index + 1}] {citation.source_location}</small><h2>{citation.title}</h2><p>{citation.excerpt}</p><button onClick={() => openPage(citation.page_id, citation.excerpt)}>View exact source</button>
+              </article>)}</div>
+            </section>}
 
-        {selectedPage && <section className="sourcePanel">
-          <div className="sectionTitle"><p className="eyebrow">SOURCE · {selectedPage.slug}</p><button onClick={() => { setSelectedPage(null); setSelectedExcerpt(""); }}>Close</button></div>
-          <h2>{selectedPage.title}</h2>{selectedExcerpt && <blockquote>{selectedExcerpt}</blockquote>}<pre>{selectedPage.content}</pre>
-          {(links.outbound.length > 0 || links.backlinks.length > 0) && <div className="connections">
-            <div><b>Links to</b>{links.outbound.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
-            <div><b>Linked from</b>{links.backlinks.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
-          </div>}
-        </section>}
+            {selectedPage && <section className="sourcePanel" ref={sourcePanelRef}>
+              <div className="sectionTitle"><p className="eyebrow">SOURCE · {selectedPage.slug}</p><button onClick={() => { setSelectedPage(null); setSelectedExcerpt(""); }}>Close</button></div>
+              <h2>{selectedPage.title}</h2>{selectedExcerpt && <blockquote>{selectedExcerpt}</blockquote>}<pre>{selectedPage.content}</pre>
+              {(links.outbound.length > 0 || links.backlinks.length > 0) && <div className="connections">
+                <div><b>Links to</b>{links.outbound.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
+                <div><b>Linked from</b>{links.backlinks.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
+              </div>}
+            </section>}
+          </div>
 
-        <section className="library">
-          <div className="sectionTitle"><p className="eyebrow">LIBRARY</p><span>{pages.length} pages</span></div>
-          {categories.length > 0 && <div className="categoryChips">
-            <button className={categoryFilter === null ? "active" : ""} onClick={() => setCategoryFilter(null)}>All</button>
-            {categories.map((category) => <button key={category} className={categoryFilter === category ? "active" : ""} onClick={() => setCategoryFilter(category)}>{category}</button>)}
-          </div>}
-          {visiblePages.length === 0 ? <p className="empty">Import a document or create a page to begin.</p> : <div className="pageGrid">{visiblePages.map((page) => <article key={page.id}><small>{page.slug} · {page.source_type}{page.category && <span className="categoryBadge">{page.category}</span>}</small><h2>{page.title}</h2><p>{page.content.slice(0, 180) || "Empty page"}</p><div className="pageActions"><button onClick={() => openPage(page.id)}>Open</button>{page.source_type === "manual" && <button onClick={() => editPage(page)} disabled={busy}>Edit</button>}<button className="danger" onClick={() => deletePage(page)} disabled={busy}>Delete</button></div></article>)}</div>}
-        </section>
+          <aside className="directory library">
+            <div className="sectionTitle"><p className="eyebrow">LIBRARY</p><span>{pages.length} pages</span></div>
+            {connectionsPage && <button className="connectionsLink" onClick={() => openPage(connectionsPage.id)}>🔗 跨文章关联索引 · {connectionsPage.title}</button>}
+            {categories.length > 0 && <div className="categoryChips">
+              <button className={categoryFilter === null ? "active" : ""} onClick={() => setCategoryFilter(null)}>All</button>
+              {categories.map((category) => <button key={category} className={categoryFilter === category ? "active" : ""} onClick={() => setCategoryFilter(category)}>{category}</button>)}
+            </div>}
+            {visiblePages.length === 0 ? <p className="empty">Import a document or create a page to begin.</p> : <div className="directoryList">{visiblePages.map((page) => <div key={page.id} className="directoryItem">
+              <button className="directoryOpen" onClick={() => openPage(page.id)}>
+                <span className="directoryTitle">{page.title}</span>
+                {page.category && <span className="categoryBadge">{page.category}</span>}
+              </button>
+              <div className="directoryActions">
+                {page.source_type === "manual" && <button onClick={() => editPage(page)} disabled={busy}>Edit</button>}
+                <button className="danger" onClick={() => deletePage(page)} disabled={busy}>Delete</button>
+              </div>
+            </div>)}</div>}
+          </aside>
+        </div>
       </section>
     </main>
   );
