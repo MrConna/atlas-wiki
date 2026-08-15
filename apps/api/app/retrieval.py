@@ -47,9 +47,12 @@ def keyword_score(query: str, text: str) -> float:
     return min(matched / len(terms), 1.0)
 
 
+MAX_HEADING_CHARS = 200
+
+
 def chunk_text(text: str, title: str, max_chars: int = 1200) -> list[dict[str, str | int]]:
     chunks: list[dict[str, str | int]] = []
-    heading = title
+    heading = title[:MAX_HEADING_CHARS]
     buffer: list[str] = []
     size = 0
 
@@ -67,7 +70,14 @@ def chunk_text(text: str, title: str, max_chars: int = 1200) -> list[dict[str, s
             continue
         if paragraph.startswith("#"):
             flush()
-            heading = paragraph.lstrip("# ").strip() or title
+            # A heading line is not always alone in its paragraph (no blank
+            # line before the body that follows it) — only the first line is
+            # the heading; the rest is body content and must still be chunked.
+            first_line, _, rest = paragraph.partition("\n")
+            heading = (first_line.lstrip("# ").strip() or title)[:MAX_HEADING_CHARS]
+            paragraph = rest.strip()
+            if not paragraph:
+                continue
         if size and size + len(paragraph) > max_chars:
             flush()
         if len(paragraph) > max_chars:
