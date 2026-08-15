@@ -1,7 +1,6 @@
 "use client";
 
-import { ComponentPropsWithoutRef, FormEvent, Suspense, useEffect, useRef, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { ComponentPropsWithoutRef, FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -70,18 +69,14 @@ function urlTransform(url: string): string {
   return url.startsWith("wikilink:") ? url : defaultUrlTransform(url);
 }
 
-export default function Home() {
-  return (
-    <Suspense fallback={null}>
-      <WikiApp />
-    </Suspense>
-  );
+// Reads the open page purely from the URL, so it's the single source of
+// truth: browser back/forward, a pasted link, and a refresh all agree.
+function pageIdFromLocation(): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get("page");
 }
 
-// useSearchParams() (below, for reflecting the open page in the URL) requires
-// a Suspense boundary around whatever calls it — split out from the default
-// export so Home itself stays a plain, boundary-providing wrapper.
-function WikiApp() {
+export default function Home() {
   const [pages, setPages] = useState<Page[]>([]);
   const [query, setQuery] = useState("");
   const [answer, setAnswer] = useState<AskResult | null>(null);
@@ -92,22 +87,32 @@ function WikiApp() {
   const [selectedExcerpt, setSelectedExcerpt] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const sourcePanelRef = useRef<HTMLElement>(null);
-  const router = useRouter();
-  const searchParams = useSearchParams();
 
   useEffect(() => {
     if (selectedPage) sourcePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [selectedPage]);
 
-  // Restore the open page from ?page=<id> on load (or on browser
-  // back/forward), so a bookmarked or shared link — or just hitting
-  // refresh — lands back on the same source instead of the bare homepage.
+  // Reflecting the open page in the URL previously went through
+  // next/navigation's router, which drives Next's client-side route
+  // transition machinery (it fetches a server payload per "navigation" and,
+  // per Next's own documented behavior, falls back to a full browser
+  // navigation if that transition fails). None of that machinery does
+  // anything useful here — this is one static client-rendered route with no
+  // server-rendered per-page content — so it's pure surface area for a
+  // failed transition to show up as a browser-level "This page couldn't
+  // load" instead of just staying in the app. Drive the URL with the plain
+  // History API instead: it never issues a network request of its own.
   useEffect(() => {
-    const pageId = searchParams.get("page");
-    if (pageId && pageId !== selectedPage?.id) void openPage(pageId, "", { updateUrl: false });
-    if (!pageId && selectedPage) { setSelectedPage(null); setSelectedExcerpt(""); }
+    const restoreFromUrl = () => {
+      const pageId = pageIdFromLocation();
+      if (pageId) void openPage(pageId, "", { updateUrl: false });
+      else { setSelectedPage(null); setSelectedExcerpt(""); }
+    };
+    restoreFromUrl();
+    window.addEventListener("popstate", restoreFromUrl);
+    return () => window.removeEventListener("popstate", restoreFromUrl);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+  }, []);
 
   async function loadPages() {
     try {
@@ -228,14 +233,14 @@ function WikiApp() {
       // A pushed URL is what makes the open page bookmarkable, shareable,
       // and reachable with the browser's own back/forward buttons — without
       // this the address bar never moves no matter what you open.
-      if (updateUrl) router.push(`?page=${pageId}`, { scroll: false });
+      if (updateUrl) window.history.pushState(null, "", `?page=${pageId}`);
     } catch (error) { setMessage(error instanceof Error ? error.message : "Could not open source"); }
   }
 
   function closePage() {
     setSelectedPage(null);
     setSelectedExcerpt("");
-    router.push("?", { scroll: false });
+    window.history.pushState(null, "", window.location.pathname);
   }
 
   const indexPages = pages.filter((page) => page.category && INDEX_CATEGORIES.has(page.category));
