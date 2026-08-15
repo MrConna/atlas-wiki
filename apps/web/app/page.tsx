@@ -1,7 +1,7 @@
 "use client";
 
 import { ComponentPropsWithoutRef, FormEvent, useEffect, useRef, useState } from "react";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 type Page = { id: string; title: string; slug: string; content: string; source_type: string; category: string | null; updated_at: string };
@@ -11,14 +11,63 @@ type AskResult = { answer: string; evidence: string; citations: Citation[] };
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
-// Notes are full of external references (X/Twitter posts, articles, local
-// project links) that may be dead, moved, or unreachable. Opening them in
-// the same tab replaces the whole app with the browser's own failure page
-// the moment one doesn't resolve — open in a new tab instead so a bad link
-// never costs the reader their place in the wiki.
-const markdownComponents = {
-  a: (props: ComponentPropsWithoutRef<"a">) => <a {...props} target="_blank" rel="noopener noreferrer" />,
-};
+// "concepts" and "connections" are the LLM-compiled index layer (cross-note
+// concept summaries and the discovered-relationships page) — a map of the
+// knowledge base, not part of it. They browse differently: few, referenced
+// often, and best scanned at a glance rather than scrolled through.
+const INDEX_CATEGORIES = new Set(["concepts", "connections"]);
+const formatDate = (iso: string) => iso.slice(0, 10);
+
+// Mirrors the API's slugify() (app/main.py) exactly — page_links resolves
+// [[wikilink]]s by slug, so inline rendering has to match by the same rule
+// or a link that resolves in the backlinks panel could dead-end here.
+function slugifyLike(value: string): string {
+  const normalized = value.normalize("NFKC").trim().toLowerCase();
+  return normalized.replace(/[^\w\-一-鿿]+/g, "-").replace(/^-+|-+$/g, "") || "untitled";
+}
+
+const WIKILINK_PATTERN = /\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g;
+
+// [[Note Title]] is Obsidian syntax, not markdown — react-markdown just
+// renders it as literal text. Rewrite it into a real markdown link with a
+// fake `wikilink:` scheme before parsing, then resolve that scheme in a
+// custom `a` renderer below.
+function preprocessWikilinks(markdown: string): string {
+  return markdown.replace(WIKILINK_PATTERN, (_match, target: string, alias?: string) => {
+    const label = (alias ?? target).trim();
+    return `[${label}](wikilink:${encodeURIComponent(target.trim())})`;
+  });
+}
+
+// Notes are also full of ordinary external references (X/Twitter posts,
+// articles, local project links) that may be dead, moved, or unreachable.
+// Opening them in the same tab replaces the whole app with the browser's
+// own failure page the moment one doesn't resolve — open those in a new
+// tab instead so a bad link never costs the reader their place in the wiki.
+// react-markdown also passes a `node` prop (the underlying hast AST node)
+// to custom renderers alongside real HTML attributes — it must be pulled
+// out here, not spread onto the native <a>, or React stringifies it onto
+// the DOM as a bogus node="[object Object]" attribute.
+function buildMarkdownComponents(pages: Page[], openPage: (pageId: string, excerpt?: string) => void) {
+  return {
+    a: ({ href, children, node: _node, ...rest }: ComponentPropsWithoutRef<"a"> & { node?: unknown }) => {
+      if (href?.startsWith("wikilink:")) {
+        const target = decodeURIComponent(href.slice("wikilink:".length));
+        const match = pages.find((page) => page.slug === slugifyLike(target));
+        if (!match) return <span className="wikilinkMissing" title="Not found in the wiki">{children}</span>;
+        return <button type="button" className="wikilinkButton" onClick={() => openPage(match.id)}>{children}</button>;
+      }
+      return <a href={href} {...rest} target="_blank" rel="noopener noreferrer">{children}</a>;
+    },
+  };
+}
+
+// wikilink: is not a real protocol — react-markdown's default URL sanitizer
+// only allows a fixed safe-scheme allowlist and empties anything else, so
+// without this override every wikilink silently loses its href.
+function urlTransform(url: string): string {
+  return url.startsWith("wikilink:") ? url : defaultUrlTransform(url);
+}
 
 export default function Home() {
   const [pages, setPages] = useState<Page[]>([]);
@@ -155,9 +204,10 @@ export default function Home() {
     } catch (error) { setMessage(error instanceof Error ? error.message : "Could not open source"); }
   }
 
-  const categories = [...new Set(pages.map((page) => page.category).filter((category): category is string => Boolean(category)))].sort();
-  const visiblePages = categoryFilter === null ? pages : pages.filter((page) => page.category === categoryFilter);
-  const connectionsPage = pages.find((page) => page.category === "connections");
+  const indexPages = pages.filter((page) => page.category && INDEX_CATEGORIES.has(page.category));
+  const knowledgePages = pages.filter((page) => !page.category || !INDEX_CATEGORIES.has(page.category));
+  const categories = [...new Set(knowledgePages.map((page) => page.category).filter((category): category is string => Boolean(category)))].sort();
+  const visiblePages = categoryFilter === null ? knowledgePages : knowledgePages.filter((page) => page.category === categoryFilter);
 
   return (
     <main>
@@ -198,7 +248,7 @@ export default function Home() {
             {selectedPage && <section className="sourcePanel" ref={sourcePanelRef}>
               <div className="sectionTitle"><p className="eyebrow">SOURCE · {selectedPage.slug}</p><button onClick={() => { setSelectedPage(null); setSelectedExcerpt(""); }}>Close</button></div>
               <h2>{selectedPage.title}</h2>{selectedExcerpt && <blockquote>{selectedExcerpt}</blockquote>}
-              <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{selectedPage.content}</ReactMarkdown></div>
+              <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={buildMarkdownComponents(pages, openPage)} urlTransform={urlTransform}>{preprocessWikilinks(selectedPage.content)}</ReactMarkdown></div>
               {(links.outbound.length > 0 || links.backlinks.length > 0) && <div className="connections">
                 <div><b>Links to</b>{links.outbound.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
                 <div><b>Linked from</b>{links.backlinks.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
@@ -207,8 +257,22 @@ export default function Home() {
           </div>
 
           <aside className="directory library">
-            <div className="sectionTitle"><p className="eyebrow">LIBRARY</p><span>{pages.length} pages</span></div>
-            {connectionsPage && <button className="connectionsLink" onClick={() => openPage(connectionsPage.id)}>🔗 跨文章关联索引 · {connectionsPage.title}</button>}
+            {indexPages.length > 0 && <div className="indexSection">
+              <div className="sectionTitle"><p className="eyebrow">🧭 INDEX</p><span>{indexPages.length} 篇</span></div>
+              <div className="indexGrid">
+                {indexPages.map((page) => <button
+                  key={page.id}
+                  className={`indexCard${page.category === "connections" ? " indexCardHub" : ""}`}
+                  title={page.title}
+                  onClick={() => openPage(page.id)}
+                >
+                  <span className="indexCardIcon">{page.category === "connections" ? "🔗" : "◆"}</span>
+                  <span className="indexCardLabel">{page.title}</span>
+                </button>)}
+              </div>
+            </div>}
+
+            <div className="sectionTitle knowledgeHeader"><p className="eyebrow">LIBRARY</p><span>{knowledgePages.length} pages</span></div>
             {categories.length > 0 && <div className="categoryChips">
               <button className={categoryFilter === null ? "active" : ""} onClick={() => setCategoryFilter(null)}>All</button>
               {categories.map((category) => <button key={category} className={categoryFilter === category ? "active" : ""} onClick={() => setCategoryFilter(category)}>{category}</button>)}
@@ -216,7 +280,10 @@ export default function Home() {
             {visiblePages.length === 0 ? <p className="empty">Import a document or create a page to begin.</p> : <div className="directoryList">{visiblePages.map((page) => <div key={page.id} className="directoryItem">
               <button className="directoryOpen" title={page.title} onClick={() => openPage(page.id)}>
                 <span className="directoryTitle">{page.title}</span>
-                {page.category && <span className="categoryBadge">{page.category}</span>}
+                <span className="directoryMeta">
+                  <span className="directoryDate">{formatDate(page.updated_at)}</span>
+                  {page.category && <span className="categoryBadge">{page.category}</span>}
+                </span>
               </button>
               <div className="directoryActions">
                 {page.source_type === "manual" && <button onClick={() => editPage(page)} disabled={busy}>Edit</button>}
