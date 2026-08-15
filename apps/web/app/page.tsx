@@ -2,7 +2,7 @@
 
 import { FormEvent, useEffect, useState } from "react";
 
-type Page = { id: string; title: string; slug: string; content: string; source_type: string; updated_at: string };
+type Page = { id: string; title: string; slug: string; content: string; source_type: string; category: string | null; updated_at: string };
 type PageLinks = { outbound: Page[]; backlinks: Page[] };
 type Citation = { page_id: string; chunk_id: string; title: string; excerpt: string; source_location?: string };
 type AskResult = { answer: string; evidence: string; citations: Citation[] };
@@ -18,6 +18,7 @@ export default function Home() {
   const [selectedPage, setSelectedPage] = useState<Page | null>(null);
   const [links, setLinks] = useState<PageLinks>({ outbound: [], backlinks: [] });
   const [selectedExcerpt, setSelectedExcerpt] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
 
   async function loadPages() {
     try {
@@ -56,12 +57,13 @@ export default function Home() {
     const title = window.prompt("Page title");
     if (!title?.trim()) return;
     const content = window.prompt("Initial Markdown content") ?? "";
+    const category = window.prompt("Category (optional)") || undefined;
     setBusy(true);
     try {
       const response = await fetch(`${API}/api/v1/pages`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title, content }),
+        body: JSON.stringify({ title, content, category }),
       });
       if (!response.ok) throw new Error("Page creation failed");
       setMessage("Page created.");
@@ -95,12 +97,13 @@ export default function Home() {
     if (!title?.trim()) return;
     const content = window.prompt("Markdown content", page.content);
     if (content === null) return;
+    const category = window.prompt("Category (optional)", page.category ?? "") ?? undefined;
     setBusy(true);
     try {
       const response = await fetch(`${API}/api/v1/pages/${page.id}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title, content }),
+        body: JSON.stringify({ title, content, category }),
       });
       if (!response.ok) throw new Error("Page update failed");
       setMessage("Page updated and re-indexed.");
@@ -135,6 +138,9 @@ export default function Home() {
       setMessage("Source opened.");
     } catch (error) { setMessage(error instanceof Error ? error.message : "Could not open source"); }
   }
+
+  const categories = [...new Set(pages.map((page) => page.category).filter((category): category is string => Boolean(category)))].sort();
+  const visiblePages = categoryFilter === null ? pages : pages.filter((page) => page.category === categoryFilter);
 
   return (
     <main>
@@ -181,7 +187,11 @@ export default function Home() {
 
         <section className="library">
           <div className="sectionTitle"><p className="eyebrow">LIBRARY</p><span>{pages.length} pages</span></div>
-          {pages.length === 0 ? <p className="empty">Import a document or create a page to begin.</p> : <div className="pageGrid">{pages.map((page) => <article key={page.id}><small>{page.slug} · {page.source_type}</small><h2>{page.title}</h2><p>{page.content.slice(0, 180) || "Empty page"}</p><div className="pageActions"><button onClick={() => openPage(page.id)}>Open</button>{page.source_type === "manual" && <button onClick={() => editPage(page)} disabled={busy}>Edit</button>}<button className="danger" onClick={() => deletePage(page)} disabled={busy}>Delete</button></div></article>)}</div>}
+          {categories.length > 0 && <div className="categoryChips">
+            <button className={categoryFilter === null ? "active" : ""} onClick={() => setCategoryFilter(null)}>All</button>
+            {categories.map((category) => <button key={category} className={categoryFilter === category ? "active" : ""} onClick={() => setCategoryFilter(category)}>{category}</button>)}
+          </div>}
+          {visiblePages.length === 0 ? <p className="empty">Import a document or create a page to begin.</p> : <div className="pageGrid">{visiblePages.map((page) => <article key={page.id}><small>{page.slug} · {page.source_type}{page.category && <span className="categoryBadge">{page.category}</span>}</small><h2>{page.title}</h2><p>{page.content.slice(0, 180) || "Empty page"}</p><div className="pageActions"><button onClick={() => openPage(page.id)}>Open</button>{page.source_type === "manual" && <button onClick={() => editPage(page)} disabled={busy}>Edit</button>}<button className="danger" onClick={() => deletePage(page)} disabled={busy}>Delete</button></div></article>)}</div>}
         </section>
       </section>
     </main>

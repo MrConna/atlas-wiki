@@ -394,8 +394,19 @@ def readiness():
 
 
 @app.get("/api/v1/pages", response_model=list[PageRead])
-def list_pages(db: Session = Depends(get_db)):
-    return db.scalars(select(Page).order_by(Page.updated_at.desc())).all()
+def list_pages(category: str | None = None, db: Session = Depends(get_db)):
+    query = select(Page).order_by(Page.updated_at.desc())
+    if category is not None:
+        query = query.where(Page.category == category)
+    return db.scalars(query).all()
+
+
+@app.get("/api/v1/categories", response_model=list[str])
+def list_categories(db: Session = Depends(get_db)):
+    values = db.scalars(
+        select(Page.category).where(Page.category.is_not(None)).distinct().order_by(Page.category)
+    ).all()
+    return values
 
 
 @app.get("/api/v1/documents", response_model=list[DocumentRead])
@@ -508,7 +519,8 @@ async def import_document(file: UploadFile = File(...), db: Session = Depends(ge
 
 @app.post("/api/v1/pages", response_model=PageRead, status_code=status.HTTP_201_CREATED)
 def create_page(payload: PageCreate, db: Session = Depends(get_db)):
-    page = Page(title=payload.title.strip(), slug=unique_slug(db, payload.title), content=payload.content)
+    category = payload.category.strip() or None if payload.category is not None else None
+    page = Page(title=payload.title.strip(), slug=unique_slug(db, payload.title), content=payload.content, category=category)
     rebuild_chunks(page)
     populate_native_embeddings(page.title, page.chunks)
     db.add(page)
@@ -534,8 +546,18 @@ def update_page(page_id: str, payload: PageUpdate, db: Session = Depends(get_db)
     page = db.get(Page, page_id)
     if page is None:
         raise HTTPException(status_code=404, detail="Page not found")
-    if page.source_type == "import":
+    content_changed = payload.title is not None or payload.content is not None
+    if content_changed and page.source_type == "import":
         raise HTTPException(status_code=409, detail="Imported source pages are immutable; replace the document instead")
+    desired_category = (payload.category.strip() or None) if payload.category is not None else page.category
+    if not content_changed:
+        # Category is metadata, not content: it may be set even on immutable
+        # imported pages, which never rebuild chunks/embeddings.
+        page.category = desired_category
+        db.commit()
+        db.refresh(page)
+        return page
+
     original_title, original_content = page.title, page.content
     desired_title = payload.title.strip() if payload.title is not None else original_title
     desired_content = payload.content if payload.content is not None else original_content
@@ -551,6 +573,7 @@ def update_page(page_id: str, payload: PageUpdate, db: Session = Depends(get_db)
         raise HTTPException(status_code=409, detail="Page changed while embeddings were generated; retry the update")
     page.title = desired_title
     page.content = desired_content
+    page.category = desired_category
     # Slugs are permanent link identifiers; renaming changes only the display title.
     db.execute(delete(Chunk).where(Chunk.page_id == page_id), execution_options={"synchronize_session": False})
     for chunk in drafts:

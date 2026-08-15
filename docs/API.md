@@ -8,10 +8,11 @@ Base path: `/api/v1`
 
 ## Pages
 
-- `GET /pages` lists wiki pages.
-- `POST /pages` creates a page.
+- `GET /pages` lists wiki pages. `?category=<name>` filters to an exact category.
+- `GET /categories` lists the distinct, non-null categories currently in use.
+- `POST /pages` creates a page. Accepts an optional `category` (free-text label, max 60 chars).
 - `GET /pages/{page_id}` returns a page.
-- `PATCH /pages/{page_id}` updates a page.
+- `PATCH /pages/{page_id}` updates a page. `category` may be set even on an immutable imported page — it is metadata, not content, and does not trigger re-chunking.
 - `DELETE /pages/{page_id}` deletes a page.
 
 ## Search

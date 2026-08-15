@@ -7,11 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field
 class PageCreate(BaseModel):
     title: str = Field(min_length=1, max_length=240)
     content: str = ""
+    category: str | None = Field(default=None, max_length=60)
 
 
 class PageUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=240)
     content: str | None = None
+    category: str | None = Field(default=None, max_length=60)
 
 
 class PageRead(BaseModel):
@@ -21,6 +23,7 @@ class PageRead(BaseModel):
     slug: str
     content: str
     source_type: str
+    category: str | None = None
     created_at: datetime
     updated_at: datetime
 

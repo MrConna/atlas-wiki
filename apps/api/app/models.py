@@ -20,6 +20,7 @@ class Page(Base):
     slug: Mapped[str] = mapped_column(String(260), unique=True, index=True)
     content: Mapped[str] = mapped_column(Text, default="")
     source_type: Mapped[str] = mapped_column(String(32), default="manual")
+    category: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
     chunks: Mapped[list["Chunk"]] = relationship(cascade="all, delete-orphan", back_populates="page")
