@@ -1,6 +1,7 @@
 "use client";
 
-import { ComponentPropsWithoutRef, FormEvent, useEffect, useRef, useState } from "react";
+import { ComponentPropsWithoutRef, FormEvent, Suspense, useEffect, useRef, useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -70,6 +71,17 @@ function urlTransform(url: string): string {
 }
 
 export default function Home() {
+  return (
+    <Suspense fallback={null}>
+      <WikiApp />
+    </Suspense>
+  );
+}
+
+// useSearchParams() (below, for reflecting the open page in the URL) requires
+// a Suspense boundary around whatever calls it — split out from the default
+// export so Home itself stays a plain, boundary-providing wrapper.
+function WikiApp() {
   const [pages, setPages] = useState<Page[]>([]);
   const [query, setQuery] = useState("");
   const [answer, setAnswer] = useState<AskResult | null>(null);
@@ -80,10 +92,22 @@ export default function Home() {
   const [selectedExcerpt, setSelectedExcerpt] = useState("");
   const [categoryFilter, setCategoryFilter] = useState<string | null>(null);
   const sourcePanelRef = useRef<HTMLElement>(null);
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   useEffect(() => {
     if (selectedPage) sourcePanelRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
   }, [selectedPage]);
+
+  // Restore the open page from ?page=<id> on load (or on browser
+  // back/forward), so a bookmarked or shared link — or just hitting
+  // refresh — lands back on the same source instead of the bare homepage.
+  useEffect(() => {
+    const pageId = searchParams.get("page");
+    if (pageId && pageId !== selectedPage?.id) void openPage(pageId, "", { updateUrl: false });
+    if (!pageId && selectedPage) { setSelectedPage(null); setSelectedExcerpt(""); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
 
   async function loadPages() {
     try {
@@ -189,7 +213,7 @@ export default function Home() {
     finally { setBusy(false); }
   }
 
-  async function openPage(pageId: string, excerpt = "") {
+  async function openPage(pageId: string, excerpt = "", { updateUrl = true } = {}) {
     setMessage("Opening source…");
     try {
       const [pageResponse, linksResponse] = await Promise.all([
@@ -201,7 +225,17 @@ export default function Home() {
       setLinks(await linksResponse.json());
       setSelectedExcerpt(excerpt);
       setMessage("Source opened.");
+      // A pushed URL is what makes the open page bookmarkable, shareable,
+      // and reachable with the browser's own back/forward buttons — without
+      // this the address bar never moves no matter what you open.
+      if (updateUrl) router.push(`?page=${pageId}`, { scroll: false });
     } catch (error) { setMessage(error instanceof Error ? error.message : "Could not open source"); }
+  }
+
+  function closePage() {
+    setSelectedPage(null);
+    setSelectedExcerpt("");
+    router.push("?", { scroll: false });
   }
 
   const indexPages = pages.filter((page) => page.category && INDEX_CATEGORIES.has(page.category));
@@ -246,7 +280,7 @@ export default function Home() {
             </section>}
 
             {selectedPage && <section className="sourcePanel" ref={sourcePanelRef}>
-              <div className="sectionTitle"><p className="eyebrow">SOURCE · {selectedPage.slug}</p><button onClick={() => { setSelectedPage(null); setSelectedExcerpt(""); }}>Close</button></div>
+              <div className="sectionTitle"><p className="eyebrow">SOURCE · {selectedPage.slug}</p><button onClick={closePage}>Close</button></div>
               <h2>{selectedPage.title}</h2>{selectedExcerpt && <blockquote>{selectedExcerpt}</blockquote>}
               <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={buildMarkdownComponents(pages, openPage)} urlTransform={urlTransform}>{preprocessWikilinks(selectedPage.content)}</ReactMarkdown></div>
               {(links.outbound.length > 0 || links.backlinks.length > 0) && <div className="connections">
