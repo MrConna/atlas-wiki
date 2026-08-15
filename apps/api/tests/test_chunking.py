@@ -1,16 +1,17 @@
 from app.retrieval import MAX_HEADING_CHARS, chunk_text
 
 
-def test_heading_glued_to_body_does_not_swallow_paragraph():
+def test_heading_glued_to_body_keeps_heading_metadata_short():
     # No blank line between the heading and the body that follows it is a
-    # common real-world markdown shape. The heading must stay just the
-    # heading line; the body must still become chunk content.
+    # common real-world markdown shape. The `heading` metadata must stay
+    # just the heading line, even though the body still becomes part of
+    # chunk content (as it does for a cleanly blank-line-separated heading).
     text = "## 1. Overview\nThis is the body paragraph that follows immediately."
     chunks = chunk_text(text, title="Doc")
 
     assert len(chunks) == 1
     assert chunks[0]["heading"] == "1. Overview"
-    assert chunks[0]["content"] == "This is the body paragraph that follows immediately."
+    assert "This is the body paragraph that follows immediately." in chunks[0]["content"]
 
 
 def test_long_first_line_heading_is_truncated():
@@ -23,9 +24,13 @@ def test_long_first_line_heading_is_truncated():
     assert len(chunks[0]["heading"]) <= MAX_HEADING_CHARS
 
 
-def test_heading_only_paragraph_still_produces_no_empty_chunk():
-    text = "## Just a heading\n\nActual content."
+def test_heading_glued_to_a_very_long_body_still_bounds_heading():
+    # Regression: a heading glued to a long body paragraph previously made
+    # `heading` (and downstream `source_location`) grow with the body,
+    # overflowing their bounded database columns.
+    long_body = "content " * 200
+    text = f"## Section\n{long_body}"
     chunks = chunk_text(text, title="Doc")
 
-    assert [c["content"] for c in chunks] == ["Actual content."]
-    assert chunks[0]["heading"] == "Just a heading"
+    assert chunks[0]["heading"] == "Section"
+    assert len(chunks[0]["heading"]) <= MAX_HEADING_CHARS

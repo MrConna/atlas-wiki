@@ -71,13 +71,12 @@ def chunk_text(text: str, title: str, max_chars: int = 1200) -> list[dict[str, s
         if paragraph.startswith("#"):
             flush()
             # A heading line is not always alone in its paragraph (no blank
-            # line before the body that follows it) — only the first line is
-            # the heading; the rest is body content and must still be chunked.
-            first_line, _, rest = paragraph.partition("\n")
+            # line before the body that follows it). The heading metadata
+            # must stay just the heading line — the full paragraph (heading
+            # + any glued body) still becomes chunk content below, same as
+            # when a blank line does separate them.
+            first_line = paragraph.partition("\n")[0]
             heading = (first_line.lstrip("# ").strip() or title)[:MAX_HEADING_CHARS]
-            paragraph = rest.strip()
-            if not paragraph:
-                continue
         if size and size + len(paragraph) > max_chars:
             flush()
         if len(paragraph) > max_chars:
