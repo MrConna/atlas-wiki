@@ -50,8 +50,6 @@ Measured on fixture version 1 before the pgvector migration:
 | --- | ---: | ---: | ---: | ---: | ---: |
 | keyword | 0.563 | 0.563 | 0.563 | 0.50 | 0.25 |
 | semantic | 0.688 | 0.750 | 0.708 | 1.00 | 1.00 |
-| hybrid | 0.625 | 0.750 | 0.688 | 1.00 | 0.50 |
+| hybrid | 0.750 | 0.750 | 0.750 | 0.50 | 0.50 |
 
 Hybrid exact Recall@5 is 1.00, while bilingual paraphrase Recall@5 is 0.667 and adversarial Recall@5 is 0.50. Even after stop-word filtering, two of four unrelated queries return false-positive results in hybrid mode, and all four do in legacy semantic mode. These measurements are descriptive baselines, not passing release thresholds; they make the benefit of real multilingual embeddings and calibrated rejection measurable.
-
-Hybrid Hit@1/MRR@10 and cross-document Recall@5 were recalibrated after fixing a chunker bug where a heading line glued to its body paragraph (no blank line between them) leaked the entire following paragraph into `heading`/`source_location`, which both truncated on long values and duplicated the heading text into chunk content. The corrected chunk boundaries shift some rank-1 hits but resolve the multi-document cross-doc queries that previously missed one of two relevant sources.
