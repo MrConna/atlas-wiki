@@ -1,6 +1,6 @@
 "use client";
 
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { ComponentPropsWithoutRef, FormEvent, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
@@ -10,6 +10,15 @@ type Citation = { page_id: string; chunk_id: string; title: string; excerpt: str
 type AskResult = { answer: string; evidence: string; citations: Citation[] };
 
 const API = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
+
+// Notes are full of external references (X/Twitter posts, articles, local
+// project links) that may be dead, moved, or unreachable. Opening them in
+// the same tab replaces the whole app with the browser's own failure page
+// the moment one doesn't resolve — open in a new tab instead so a bad link
+// never costs the reader their place in the wiki.
+const markdownComponents = {
+  a: (props: ComponentPropsWithoutRef<"a">) => <a {...props} target="_blank" rel="noopener noreferrer" />,
+};
 
 export default function Home() {
   const [pages, setPages] = useState<Page[]>([]);
@@ -189,7 +198,7 @@ export default function Home() {
             {selectedPage && <section className="sourcePanel" ref={sourcePanelRef}>
               <div className="sectionTitle"><p className="eyebrow">SOURCE · {selectedPage.slug}</p><button onClick={() => { setSelectedPage(null); setSelectedExcerpt(""); }}>Close</button></div>
               <h2>{selectedPage.title}</h2>{selectedExcerpt && <blockquote>{selectedExcerpt}</blockquote>}
-              <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]}>{selectedPage.content}</ReactMarkdown></div>
+              <div className="markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>{selectedPage.content}</ReactMarkdown></div>
               {(links.outbound.length > 0 || links.backlinks.length > 0) && <div className="connections">
                 <div><b>Links to</b>{links.outbound.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
                 <div><b>Linked from</b>{links.backlinks.map((page) => <button key={page.id} onClick={() => openPage(page.id)}>{page.title}</button>)}</div>
