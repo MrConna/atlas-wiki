@@ -205,7 +205,7 @@ export default function Home() {
               {categories.map((category) => <button key={category} className={categoryFilter === category ? "active" : ""} onClick={() => setCategoryFilter(category)}>{category}</button>)}
             </div>}
             {visiblePages.length === 0 ? <p className="empty">Import a document or create a page to begin.</p> : <div className="directoryList">{visiblePages.map((page) => <div key={page.id} className="directoryItem">
-              <button className="directoryOpen" onClick={() => openPage(page.id)}>
+              <button className="directoryOpen" title={page.title} onClick={() => openPage(page.id)}>
                 <span className="directoryTitle">{page.title}</span>
                 {page.category && <span className="categoryBadge">{page.category}</span>}
               </button>

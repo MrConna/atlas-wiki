@@ -32,7 +32,7 @@ article small { color: #9aa39f; } article h2 { font: 400 27px Georgia, serif; ma
 .answer, .library { margin-top: 38px; padding: 30px; background: white; border: 1px solid var(--line); border-radius: 7px; }.answerText { font: 400 23px/1.55 Georgia, serif; max-width: 800px; }.citations, .pageGrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; margin-top: 30px; }.citations article, .pageGrid article { padding: 20px; border: 1px solid var(--line); border-right: 0; }.citations article:last-child, .pageGrid article:last-child { border-right: 1px solid var(--line); }.citations article h2, .pageGrid article h2 { font-size: 20px; }.citations article p, .pageGrid article p { font-size: 13px; }.sectionTitle { display: flex; justify-content: space-between; align-items: center; }.sectionTitle span, .empty { color: var(--muted); font-size: 13px; }
 .pageActions { display: flex; gap: 8px; margin-top: 16px; }.pageActions button { background: #edf1ee; padding: 8px 12px; font-size: 12px; }.pageActions .danger { color: #963d35; }
 .categoryChips { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 22px; }.categoryChips button { background: #edf1ee; border: 1px solid var(--line); padding: 6px 12px; font-size: 12px; font-weight: 400; border-radius: 99px; }.categoryChips button.active { background: var(--green); color: white; border-color: var(--green); }
-.categoryBadge { display: inline-block; background: #edf1ee; color: var(--green); border-radius: 99px; padding: 2px 9px; font-size: 11px; font-weight: 700; margin-left: 6px; flex-shrink: 0; }
+.categoryBadge { display: inline-block; background: #edf1ee; color: var(--green); border-radius: 99px; padding: 2px 9px; font-size: 11px; font-weight: 700; flex-shrink: 0; }
 .workspaceGrid { display: grid; grid-template-columns: 1fr 340px; align-items: start; gap: 26px; }
 .main { min-width: 0; }
 .directory { position: sticky; top: 20px; max-height: calc(100vh - 40px); overflow-y: auto; margin-top: 0; }
@@ -40,8 +40,8 @@ article small { color: #9aa39f; } article h2 { font: 400 27px Georgia, serif; ma
 .directoryList { display: flex; flex-direction: column; }
 .directoryItem { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--line); padding: 9px 0; }
 .directoryItem:last-child { border-bottom: 0; }
-.directoryOpen { flex: 1; min-width: 0; text-align: left; background: transparent; border: 0; padding: 0; font-weight: 400; display: flex; align-items: center; gap: 6px; }
-.directoryTitle { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink); }
+.directoryOpen { flex: 1; min-width: 0; text-align: left; background: transparent; border: 0; padding: 0; font-weight: 400; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.directoryTitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink); }
 .directoryActions { display: flex; gap: 2px; flex-shrink: 0; }
 .directoryActions button { background: transparent; border: 0; padding: 4px 6px; font-size: 11px; color: var(--muted); font-weight: 400; }
 .directoryActions .danger { color: #963d35; }
