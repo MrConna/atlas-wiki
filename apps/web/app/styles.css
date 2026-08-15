@@ -36,12 +36,20 @@ article small { color: #9aa39f; } article h2 { font: 400 27px Georgia, serif; ma
 .workspaceGrid { display: grid; grid-template-columns: 1fr 340px; align-items: start; gap: 26px; }
 .main { min-width: 0; }
 .directory { position: sticky; top: 20px; max-height: calc(100vh - 40px); overflow-y: auto; margin-top: 0; }
-.connectionsLink { display: block; width: 100%; text-align: left; background: #eef5f0; border: 1px solid #b8d4c4; color: var(--green); font-weight: 700; padding: 11px 13px; border-radius: 6px; margin-bottom: 16px; font-size: 13px; }
+.indexSection { margin-bottom: 20px; padding-bottom: 18px; border-bottom: 1px solid var(--line); }
+.indexGrid { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.indexCard { display: inline-flex; align-items: center; gap: 6px; background: #eef5f0; border: 1px solid #b8d4c4; color: var(--green); border-radius: 6px; padding: 7px 10px; font-size: 12px; font-weight: 400; max-width: 100%; }
+.indexCardIcon { font-size: 11px; flex-shrink: 0; }
+.indexCardLabel { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.indexCardHub { background: var(--green); color: white; border-color: var(--green); font-weight: 700; }
+.knowledgeHeader { margin-top: 4px; }
 .directoryList { display: flex; flex-direction: column; }
 .directoryItem { display: flex; align-items: center; justify-content: space-between; gap: 8px; border-bottom: 1px solid var(--line); padding: 9px 0; }
 .directoryItem:last-child { border-bottom: 0; }
 .directoryOpen { flex: 1; min-width: 0; text-align: left; background: transparent; border: 0; padding: 0; font-weight: 400; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .directoryTitle { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: var(--ink); }
+.directoryMeta { display: flex; align-items: center; gap: 6px; }
+.directoryDate { font-size: 11px; color: var(--muted); flex-shrink: 0; }
 .directoryActions { display: flex; gap: 2px; flex-shrink: 0; }
 .directoryActions button { background: transparent; border: 0; padding: 4px 6px; font-size: 11px; color: var(--muted); font-weight: 400; }
 .directoryActions .danger { color: #963d35; }
@@ -53,6 +61,8 @@ article small { color: #9aa39f; } article h2 { font: 400 27px Georgia, serif; ma
 .markdown p { margin: 14px 0; }
 .markdown ul, .markdown ol { margin: 14px 0; padding-left: 24px; }.markdown li { margin: 6px 0; }
 .markdown a { color: var(--green); }.markdown strong { font-weight: 700; }
+.wikilinkButton { display: inline; background: transparent; border: 0; padding: 0; margin: 0; font: inherit; color: var(--green); font-weight: 700; cursor: pointer; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; }
+.wikilinkMissing { color: var(--muted); text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px; cursor: help; }
 .markdown hr { border: 0; border-top: 1px solid #cad6d0; margin: 26px 0; }
 .markdown code { background: #e3ece6; color: #1c3b2e; padding: 2px 6px; border-radius: 4px; font: 13px ui-monospace, SFMono-Regular, Consolas, monospace; }
 .markdown pre { white-space: pre; background: #1c2b24; color: #e8f1ea; padding: 16px; border-radius: 6px; overflow-x: auto; }.markdown pre code { background: transparent; color: inherit; padding: 0; }
