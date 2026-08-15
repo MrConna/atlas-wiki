@@ -24,7 +24,7 @@ def test_fresh_sqlite_migration_preserves_legacy_embedding_column(tmp_path):
         version = connection.execute("SELECT version_num FROM alembic_version").fetchone()[0]
 
     assert {"legacy_embedding", "embedding", "embedding_model", "embedding_version"} <= columns
-    assert version == "0002_pgvector_embeddings"
+    assert version == "0003_page_category"
 
 
 def test_existing_sqlite_migration_preserves_legacy_embedding_data(tmp_path):

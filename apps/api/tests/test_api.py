@@ -31,7 +31,7 @@ def prepare_readiness_database(monkeypatch, tmp_path: Path):
     with engine.begin() as connection:
         connection.execute(text("DROP TABLE IF EXISTS alembic_version"))
         connection.execute(text("CREATE TABLE alembic_version (version_num VARCHAR(128) NOT NULL)"))
-        connection.execute(text("INSERT INTO alembic_version VALUES ('0002_pgvector_embeddings')"))
+        connection.execute(text("INSERT INTO alembic_version VALUES ('0003_page_category')"))
     monkeypatch.setattr("app.main.settings.upload_dir", str(tmp_path))
     monkeypatch.setattr("app.main.settings.embedding_provider", "legacy")
     monkeypatch.setattr("app.main.settings.model_provider", "none")
@@ -240,6 +240,39 @@ def test_page_search_and_delete_flow():
 
     assert client.delete(f"/api/v1/pages/{page['id']}").status_code == 204
     assert client.get("/api/v1/search", params={"q": "locally"}).json() == []
+
+
+def test_pages_can_be_categorized_created_filtered_and_updated():
+    concept = client.post("/api/v1/pages", json={"title": "RAG", "content": "x", "category": "concepts"}).json()
+    uncategorized = client.post("/api/v1/pages", json={"title": "Scratch"}).json()
+    assert concept["category"] == "concepts"
+    assert uncategorized["category"] is None
+
+    assert client.get("/api/v1/categories").json() == ["concepts"]
+
+    filtered = client.get("/api/v1/pages", params={"category": "concepts"}).json()
+    assert [page["id"] for page in filtered] == [concept["id"]]
+
+    recategorized = client.patch(f"/api/v1/pages/{uncategorized['id']}", json={"category": "concepts"}).json()
+    assert recategorized["category"] == "concepts"
+    assert recategorized["title"] == "Scratch"  # category-only PATCH leaves content untouched
+
+    cleared = client.patch(f"/api/v1/pages/{concept['id']}", json={"category": ""}).json()
+    assert cleared["category"] is None
+
+
+def test_category_can_be_set_on_an_otherwise_immutable_imported_page():
+    imported = client.post(
+        "/api/v1/imports",
+        files={"file": ("source.txt", b"Immutable source", "text/plain")},
+    ).json()["page"]
+
+    categorized = client.patch(f"/api/v1/pages/{imported['id']}", json={"category": "imports"})
+    assert categorized.status_code == 200
+    assert categorized.json()["category"] == "imports"
+
+    still_immutable = client.patch(f"/api/v1/pages/{imported['id']}", json={"content": "changed"})
+    assert still_immutable.status_code == 409
 
 
 def test_duplicate_titles_receive_unique_slugs():
